@@ -140,7 +140,7 @@ def retrieve(query, opt, intent_request, session_attributes):
         if 'output' in response and 'text' in response['output']:
             if 'Sorry, I am unable to assist you with this request' in response['output']['text']:
                 logger.error("Bedrock retrieve_and_generate returned an error message.")
-                response['output']['text'] = '🤖 죄송해요, 해당 요청은 처리할 수 없어요. 다른 질문 있으신가요?'
+                response['output']['text'] = '🤖 죄송해요, 해당 요청은 처리할 수 없어요. 인터넷을 사용하는 실시간 정보 처리는 제가 할 수 없습니다. 좀 더 구체적인 정보를 제공해주시거나 다른 질문을 해주시면 도움을 드릴 수 있을 것 같아요.'
         
         
         return response
@@ -724,4 +724,3 @@ def lambda_handler(event, context):
     
     
     
-
