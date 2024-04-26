@@ -119,19 +119,29 @@ def build_response(intent_request, session_attributes, fulfillment_state, messag
 
 def retrieve(query):
     modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
-    # modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/opus-20240307-v1:0'
+    # modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-opus-20240229-v1:0'
     kbId = "RQ7PKC2IZP"
+    
+    prompt = f"""
+    You are an AI assistant created by Anthropic to be helpful, harmless, and honest. The user has provided the following question:
+
+    - Question: {query}
+
+    Please provide a thoughtful and informative response to the user's question. 
+    If you do not have enough information to provide a complete answer, 
+    please indicate that you are unable to fully address the query and suggest ways the user could provide more details to help you assist them better. Answer in Korean.
+    """
     
     try:
         response = bedrock_agent_runtime.retrieve_and_generate(
             input={
-                'text': query,
+                'text': prompt,
             },
             retrieveAndGenerateConfiguration={
                 'type': 'KNOWLEDGE_BASE',
                 'knowledgeBaseConfiguration': {
                     'knowledgeBaseId': kbId,
-                    'modelArn': modelArn,
+                    'modelArn': modelArn
                 }
             }
         )
@@ -148,39 +158,44 @@ def retrieve(query):
 
     
 def format_response_with_citations(text_response, citations_data):
-    logger.info('citations_data: %s', citations_data)
-    
-    # 출처 정보가 없을 경우, 기존 응답을 그대로 반환합니다.
-    if not citations_data:
-        return str(text_response)
+    try:
+        logger.info('citations_data: %s', citations_data)
         
-    # 중복된 (source_text, source_location) 세트 제거
-    unique_citations = list(set(citations_data))    
+        # 출처 정보가 없을 경우, 기존 응답을 그대로 반환합니다.
+        if not citations_data:
+            return str(text_response)
+        
+        # 중복된 (source_text, source_location) 세트 제거
+        unique_citations = list(set(citations_data))
+        
+        # 출처 정보를 포함하는 문자열을 생성합니다.
+        content = str(text_response) + '<br><br> 📚 <b>출처</b>'
+        num_citations = min(len(unique_citations), 3)  # 최대 3개의 출처만 가져옴
+        
+        for i, (source_text, source_location) in enumerate(unique_citations[:3]):  # 최대 3개의 출처만 처리
+            # 's3://kb-able-talk-s3/test/test.pdf' 형태에서 'test.pdf' 추출
+            file_name = source_location.split('/')[-1]
+            
+            # 출처 텍스트가 00자 이상인 경우 00자까지만 표시하고 '...'을 추가
+            if len(source_text) > 15:
+                source_text = source_text[:15] + '...'
+            
+            s3_url = generate_s3_url(source_location)
+            
+            # 링크 생성
+            citation_string = '<br><b>[{}]</b> <a href="{}" target="\\\\_blank">{}</a> <br>({})'.format(i+1, s3_url, file_name, source_text)
+            
+            # 마지막 출처인 경우에는 쉼표를 추가하지 않습니다.
+            if i < num_citations - 1:
+                citation_string += ', '
+            
+            content += citation_string
+        
+        return content
     
-    # 출처 정보를 포함하는 문자열을 생성합니다.
-    content = str(text_response) + '<br><br> 📚 <b>출처</b>'
-
-    num_citations = len(unique_citations)
-    for i, (source_text, source_location) in enumerate(unique_citations):
-        # 's3://kb-able-talk-s3/test/test.pdf' 형태에서 'test.pdf' 추출
-        file_name = source_location.split('/')[-1]
-
-        # 출처 텍스트가 00자 이상인 경우 00자까지만 표시하고 '...'을 추가
-        if len(source_text) > 15:
-            source_text = source_text[:15] + '...'
-
-        s3_url = generate_s3_url(source_location)
-
-        # 링크 생성
-        citation_string = '<br><b>[{}]</b> <a href="{}" target="\\_blank">{}</a> <br>({})'.format(i+1, s3_url, file_name, source_text)
-
-        # 마지막 출처인 경우에는 쉼표를 추가하지 않습니다.
-        if i < num_citations - 1:
-            citation_string += ', '
-
-        content += citation_string
-
-    return content
+    except Exception as e:
+        logger.error('Error in format_response_with_citations: %s', str(e))
+        return str(text_response)  # 예외 발생 시 기존 응답을 그대로 반환
     
 
 def generate_s3_url(source_location):
@@ -268,12 +283,95 @@ def get_s3_inventory_data():
     
     return parsed_content
 
+
+def get_suggestion_from_metadata_os_picker(intent_request, session_attributes):
+    logger.info('########## get_suggestion_from_metadata_os')
+
+    try:
+        modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
+        kbId = "RQ7PKC2IZP"
+
+        prompt = f"""
+        Recommend questions users can ask you based on your knowledge base. No source information is included. Answer in Korean.
+        """
+
+        response = bedrock_agent_runtime.retrieve_and_generate(
+            input={
+                'text': prompt
+            },
+            retrieveAndGenerateConfiguration={
+                'type': 'KNOWLEDGE_BASE',
+                'knowledgeBaseConfiguration': {
+                    'knowledgeBaseId': kbId,
+                    'modelArn': modelArn
+                }
+            }
+        )
+
+        logger.info('get_suggestion_from_metadata_os-response: %s', response)
+
+        question_list = response['output']['text'].split('\n')[1:]  # 첫 번째 요소 제외
+
+        list_picker_content = {
+            "templateType": "ListPicker",
+            "version": "1.0",
+            "data": {
+                "replyMessage": {
+                    "title": "질문 선택해주세요.",
+                    "subtitle": "아래 질문 중에서 선택하세요.",
+                    "imageType": "URL",
+                    "imageData": "https://interactive-msg.s3-us-west-2.amazonaws.com/fruit_34.3kb.jpg",
+                    "imageDescription": "질문 선택하기"
+                },
+                "content": {
+                    "title": "사용자가 물어볼 수 있는 질문",
+                    "subtitle": "질문을 선택해주세요.",
+                    "imageType": "URL",
+                    "imageData": "https://interactive-msg.s3-us-west-2.amazonaws.com/fruit_34.3kb.jpg",
+                    "imageDescription": "질문 선택하기",
+                    "elements": [
+                        {
+                            "title": question,
+                            "subtitle": "",
+                            "imageType": "URL",
+                            "imageData": "https://interactive-message-testing.s3-us-west-2.amazonaws.com/apple_4.2kb.jpg"
+                        } for question in question_list
+                    ]
+                }
+            }
+        }
+
+        session_attributes['appContext'] = json.dumps(list_picker_content)
+
+        return build_response(
+            intent_request=intent_request,
+            session_attributes=session_attributes,
+            fulfillment_state="Fulfilled",
+            message={
+                'contentType': 'PlainText',
+                'content': '질문을 선택해주세요.'
+            }
+        )
+
+    except Exception as e:
+        return build_response(
+            intent_request=intent_request,
+            session_attributes=session_attributes,
+            fulfillment_state="Fulfilled",
+            message={
+                'contentType': 'PlainText',
+                'content': str(e)
+            }
+        )
+
+
 def get_suggestion_from_metadata_os(intent_request, session_attributes):
     logger.info('################ get_suggestion_from_metadata_os ################')
     try:
         modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
-        # modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/opus-20240307-v1:0'
-        kbId = "JS9ZJONAQY"  # readme.txt 
+        # modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-opus-20240229-v1:0'
+        # kbId = "JS9ZJONAQY"  # readme.txt 
+        kbId = "RQ7PKC2IZP"
         
         
         # prompt = f"""
@@ -281,7 +379,7 @@ def get_suggestion_from_metadata_os(intent_request, session_attributes):
         # """
         
         prompt = f"""
-        Recommend questions users can ask you based on your knowledge base. Answer in Korean.
+        Recommend questions users can ask you based on your knowledge base. No source information is included. Answer in Korean.
         """
     
         response = bedrock_agent_runtime.retrieve_and_generate(
@@ -292,13 +390,13 @@ def get_suggestion_from_metadata_os(intent_request, session_attributes):
                 'type': 'KNOWLEDGE_BASE',
                 'knowledgeBaseConfiguration': {
                     'knowledgeBaseId': kbId,
-                    'modelArn': modelArn,
+                    'modelArn': modelArn
                 }
             }
         )
         
-        content = response['output']['text']
-        logger.info('get_suggestion_from_metadata_os-content: %s', content)
+        content = response['output']['text'] + '<br><br>📚 학습 정보: <a href="https://www.kbsec.com/go.able?linkcd=m06100004">KB증권 홈페이지 약관/유의사항</a>'
+        logger.info('get_suggestion_from_metadata_os-response: %s', response)
         app_context = {
             "altMessages": {
                 "markdown": content
@@ -306,8 +404,85 @@ def get_suggestion_from_metadata_os(intent_request, session_attributes):
         }
         session_attributes['appContext'] = json.dumps(app_context)
         
+        return build_response(
+            intent_request=intent_request,
+            session_attributes=session_attributes,
+            fulfillment_state="Fulfilled",
+            message={
+                'contentType': 'PlainText',
+                'content': content
+            }
+        )
+    except Exception as e:
+        return build_response(
+            intent_request=intent_request,
+            session_attributes=session_attributes,
+            fulfillment_state="Fulfilled",
+            message={
+                'contentType': 'PlainText',
+                'content': str(e)
+            }
+        )
+       
+
+def get_suggestion_from_metadata_os_btn(intent_request, session_attributes):
+    logger.info('########## get_suggestion_from_metadata_os')
+    
+    try:
+        modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
+        # modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-opus-20240229-v1:0'
+        # kbId = "JS9ZJONAQY"  # readme.txt 
+        kbId = "RQ7PKC2IZP"
         
         
+        # prompt = f"""
+        # 당신이 갖고있는 지식 기반으로 사용자가 당신에게 물어볼 수 있는 질문을 추천해주세요.
+        # """
+        
+        prompt = f"""
+        Recommend questions users can ask you based on your knowledge base. No source information is included. Answer in Korean.
+        """
+    
+        response = bedrock_agent_runtime.retrieve_and_generate(
+            input={
+                'text': prompt
+            },
+            retrieveAndGenerateConfiguration={
+                'type': 'KNOWLEDGE_BASE',
+                'knowledgeBaseConfiguration': {
+                    'knowledgeBaseId': kbId,
+                    'modelArn': modelArn
+                }
+            }
+        )
+        
+        logger.info('get_suggestion_from_metadata_os-response: %s', response)
+        
+        question_list = response['output']['text'].split('\n')
+        buttons = []
+        for question in question_list[1:]:  # 첫 번째 요소는 제외
+            if question.strip():
+                buttons.append({
+                    'text': question.strip().replace('- ', ''),
+                    'value': question.strip().replace('- ', '')
+                })
+        
+        content = '사용자가 질문할 수 있는 예시입니다. 버튼을 클릭해 보세요:<br><br>'
+        content += '📚 학습 정보: <a href="https://www.kbsec.com/go.able?linkcd=m06100004">KB증권 홈페이지 약관/유의사항</a>'
+        
+        logger.info('########## question_list: %s', question_list)
+        logger.info('########## question: %s', question)
+        logger.info('########## buttons: %s', buttons)
+        
+        app_context = {
+            "altMessages": {
+                "markdown": content
+            },
+            "buttons": buttons
+        }
+        
+        session_attributes['appContext'] = json.dumps(app_context)
+        logger.info('########## appContext: %s', session_attributes['appContext'])
         
         return build_response(
             intent_request=intent_request,
@@ -333,8 +508,9 @@ def get_suggestion_from_metadata_os(intent_request, session_attributes):
 def review_query_with_metadata_os(query):
     try:
         modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
-        # modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/opus-20240307-v1:0'
-        kbId = "JS9ZJONAQY"  # readme.txt 
+        # modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-opus-20240229-v1:0'
+        # kbId = "JS9ZJONAQY"  # readme.txt 
+        kbId = "RQ7PKC2IZP"
         
         # TODO Shuan metadata 자동화 ######
         # AS-IS: 지금은 수동으로 readme 파일을 등록해놨음 - S3:1, OS:2
@@ -352,6 +528,7 @@ def review_query_with_metadata_os(query):
         prompt = f"""
         question: "{query}"
         Please consider if you can provide an answer to this question. If possible, prepare a response based on relevant information, and if not possible, respond with 'sorry'.
+        No source information is included.
         """
     
         logger.info('prompt: %s', prompt)
@@ -363,80 +540,78 @@ def review_query_with_metadata_os(query):
                 'type': 'KNOWLEDGE_BASE',
                 'knowledgeBaseConfiguration': {
                     'knowledgeBaseId': kbId,
-                    'modelArn': modelArn,
+                    'modelArn': modelArn
                 }
             }
         )
         
         review_result = response['output']['text'].strip().lower()
         logger.info('review_result response: %s', review_result)
+        # todo shuan
+        # [INFO]	2024-04-26T01:27:34.694Z	3841859b-6487-4e7b-ba3d-1c88c3c473d0	review_result response: the search results do not contain specific information about financial product fees and costs. the results mostly contain various financial service agreements and terms of use, but do not provide a comprehensive overview of fees and costs associated with different financial products. without more detailed information, i cannot provide a satisfactory answer to the question about financial product fees and costs.
+
         
-        if 'sorry' in review_result or '죄송합니다' in review_result:
-            logger.info('############### review_result - if ###############')
+        # if 'sorry' in review_result or 'do not contain' in review_result or '죄송합니다' in review_result or '검색 결과' in review_result or '찾을 수 없습니다' in review_result:
+        if any(phrase in review_result for phrase in ['sorry', 'do not contain', '죄송합니다', '검색 결과', '찾을 수 없습니다']):
+            logger.info('[review_query_with_metadata_os] can_answer: False')
             return {'can_answer': False}
         else:
             return {'can_answer': True}
     except Exception as e:
+        logger.error('Exception: %s', {str(e)})
         # return {'can_answer': False, 'message': f'질문 검토 중 오류가 발생했습니다: {str(e)}'}
         return {'can_answer': False}
     
 def handle_rag(intent_request, content_data, session_attributes):
-    source_text = None
-    source_location = None
-    
-    if not content_data:
-        return elicit_slot(
-            session_attributes=session_attributes,
-            intent_name='Reception',
-            slots=get_slots(intent_request),
-            slot_to_elicit='ContentData',
-            message={
-                'contentType': 'PlainText',
-                'content': '⚠️ 이용약관 및 유의사항에 대한 질문을 입력해주세요.'
-            }
-        )
-    
-    doc_list = get_s3_inventory_data() ## TODO metadata 파싱 결과 - 아직 사용은 안함
-    
-    # 사용자 질문에 답변 가능한지 검토 요청
-    review_response = review_query_with_metadata_os(content_data)
-    
-    if review_response['can_answer']:
-        response = retrieve(content_data)
-        logger.info('retrieve-response: %s', response)
-        citations_data = extract_citation_data(response)
-        content = format_response_with_citations(response['output']['text'], citations_data)
+    try:
+        source_text = None
+        source_location = None
         
-        app_context = {
-            "altMessages": {
-                "markdown": content
-            }
-        }
-        session_attributes['appContext'] = json.dumps(app_context)
+        if not content_data:
+            return elicit_slot(
+                session_attributes=session_attributes,
+                intent_name='Reception',
+                slots=get_slots(intent_request),
+                slot_to_elicit='ContentData',
+                message={
+                    'contentType': 'PlainText',
+                    'content': '⚠️ 이용약관 및 유의사항에 대한 질문을 입력해주세요.'
+                }
+            )
         
-        return build_response(
-            intent_request=intent_request,
-            session_attributes=session_attributes,
-            fulfillment_state="Fulfilled",
-            message={
-                'contentType': 'PlainText',
-                'content': content
+        doc_list = get_s3_inventory_data() ## TODO metadata 파싱 결과 - 아직 사용은 안함
+        
+        # 사용자 질문에 답변 가능한지 검토 요청
+        review_response = review_query_with_metadata_os(content_data)
+        
+        if review_response['can_answer']:
+            response = retrieve(content_data)
+            logger.info('retrieve-response: %s', response)
+            citations_data = extract_citation_data(response)
+            content = format_response_with_citations(response['output']['text'], citations_data)
+            
+            app_context = {
+                "altMessages": {
+                    "markdown": content
+                }
             }
-        )
-    else:
+            session_attributes['appContext'] = json.dumps(app_context)
+            
+            return build_response(
+                intent_request=intent_request,
+                session_attributes=session_attributes,
+                fulfillment_state="Fulfilled",
+                message={
+                    'contentType': 'PlainText',
+                    'content': content
+                }
+            )
+        else:
+            return fallbackIntent(intent_request, content_data, session_attributes)
+        
+    except Exception as e:
+        logger.error('Exception: %s', e, exc_info=True)
         return fallbackIntent(intent_request, content_data, session_attributes)
-        
-    # else:
-    #     return build_response(
-    #         intent_request=intent_request,
-    #         session_attributes=session_attributes,
-    #         fulfillment_state="Fulfilled",
-    #         message={
-    #             'contentType': 'PlainText',
-    #             'content': review_response['message']
-    #         }
-    #     )
-        
 
 def fallbackIntent(intent_request, content_data, session_attributes):
     try:
@@ -528,10 +703,9 @@ def dispatch(intent_request):
     content = get_slot(intent_request, 'ContentData')
     session_attributes = get_session_attributes(intent_request)
     
-    # if intent_name == 'Introduce':
-    #     return get_suggestion_from_metadata_os(intent_request, session_attributes)
-    
     return Reception(intent_request)
+
+
 
 def lambda_handler(event, context):
     try:
@@ -541,4 +715,5 @@ def lambda_handler(event, context):
         return response
     except Exception as e:
         return handle_exception(e, event, get_session_attributes(event))
-    
+
+
