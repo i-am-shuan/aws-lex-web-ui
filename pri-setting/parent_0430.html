@@ -215,8 +215,17 @@
       // shuan
       const spinner = document.createElement('div');
       spinner.classList.add('loading-spinner');
-      spinner.textContent = '💬 KB Able Talk Loding.. ';
+      spinner.textContent = '💬 KB Able Talk Loading.. ';
       document.body.appendChild(spinner);
+
+      let loadingDots = 0;
+      function updateLoadingText() {
+        spinner.textContent = `💬 KB Able Talk Loading${'.'.repeat(loadingDots)}`;
+        loadingDots = (loadingDots + 1) % 4;
+      }
+
+      // 1초 간격으로 로딩 문구 업데이트
+      const loadingInterval = setInterval(updateLoadingText, 1000);
 
       iframeLoader.load(chatbotUiconfig)
         .then(function () {
@@ -224,6 +233,7 @@
            // so I can send a ping to the iframe
            iframeLoader.api.ping();
            spinner.remove(); // shuan
+           clearInterval(loadingInterval);
 
           // perform actions on the parent dependent on the chatbot
           // loading. For example, enable the send button once the
@@ -234,6 +244,7 @@
         .catch(function (error) {
           console.error('chatbot UI failed to load', error);
           spinner.remove(); // shuan
+          clearInterval(loadingInterval);
 
         });
 
