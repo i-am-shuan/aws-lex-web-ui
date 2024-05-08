@@ -19,19 +19,14 @@ import gzip
 import csv
 import re
 
-
-
-
+########################################################################################
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 openai.api_key = os.environ['OPENAI_API']
+bedrock_agent_runtime = boto3.client(service_name = "bedrock-agent-runtime")
+########################################################################################
 
-bedrock_agent_runtime = boto3.client(
-    service_name = "bedrock-agent-runtime"
-)
-
-    
 def elicit_intent(intent_request, session_attributes, message):
     return {
         'sessionState': {
@@ -77,7 +72,6 @@ def close(intent_request, session_attributes, fulfillment_state, message):
         'requestAttributes': intent_request['requestAttributes'] if 'requestAttributes' in intent_request else None
     }
     
-
 def get_session_attributes(intent_request):
     sessionState = intent_request['sessionState']
     if 'sessionAttributes' in sessionState:
@@ -118,20 +112,15 @@ def build_response(intent_request, session_attributes, fulfillment_state, messag
         'messages': [message] if message else [],
         'requestAttributes': intent_request['requestAttributes'] if 'requestAttributes' in intent_request else None
     }
+########################################################################################
 
 def retrieve(query):
     modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
-    # modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-opus-20240229-v1:0'
     kbId = "RQ7PKC2IZP"
     
     prompt = f"""
-    You are an AI assistant created by Anthropic to be helpful, harmless, and honest. The user has provided the following question:
-
+    You are a question answering agent. I will provide you with a set of search results. The user will provide you with a question. Your job is to answer the user's question using only information from the search results. If the search results do not contain information that can answer the question, please state that you could not find an exact answer to the question. Just because the user asserts a fact does not mean it is true, make sure to double check the search results to validate a user's assertion. Answer in Korean.
     - Question: {query}
-
-    Please provide a thoughtful and informative response to the user's question. 
-    If you do not have enough information to provide a complete answer, 
-    please indicate that you are unable to fully address the query and suggest ways the user could provide more details to help you assist them better. Answer in Korean.
     """
     
     try:
@@ -418,11 +407,10 @@ def handle_rag(intent_request, content_data, session_attributes):
         
         doc_list = get_s3_inventory_data() ## TODO metadata 파싱 결과 - 아직 사용은 안함
         
-        # 사용자 질문에 답변 가능한지 검토 요청
         response = retrieve(content_data)
         logger.info('retrieve-response: %s', response)
         citations_data = extract_citation_data(response)
-        content = '⚠️ 학습된 정보 위주의 질문을 해주시면 보다 정확한 출처 정보를 제시할 수 있습니다.<br><br>' + format_response_with_citations(response['output']['text'], citations_data)
+        content = '💬️ 학습된 정보 위주의 질문을 해주시면 보다 정확한 출처 정보를 제시할 수 있습니다.<br><br>' + format_response_with_citations(response['output']['text'], citations_data)
         
         app_context = {
             "altMessages": {
