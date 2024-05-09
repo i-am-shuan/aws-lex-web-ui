@@ -215,12 +215,12 @@
       // shuan
       const spinner = document.createElement('div');
       spinner.classList.add('loading-spinner');
-      spinner.textContent = '💬 KB Able Talk Loading.. ';
+      spinner.textContent = '💬 Loading.. ';
       document.body.appendChild(spinner);
 
       let loadingDots = 0;
       function updateLoadingText() {
-        spinner.textContent = `💬 KB Able Talk Loading${'.'.repeat(loadingDots)}`;
+        spinner.textContent = `💬 Loading${'.'.repeat(loadingDots)}`;
         loadingDots = (loadingDots + 1) % 4;
       }
 
