@@ -17,19 +17,16 @@ from botocore.exceptions import ClientError
 from botocore.exceptions import BotoCoreError
 import gzip
 import csv
+import re
 
-
-
+########################################################################################
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 openai.api_key = os.environ['OPENAI_API']
+bedrock_agent_runtime = boto3.client(service_name = "bedrock-agent-runtime")
+########################################################################################
 
-bedrock_agent_runtime = boto3.client(
-    service_name = "bedrock-agent-runtime"
-)
-
-    
 def elicit_intent(intent_request, session_attributes, message):
     return {
         'sessionState': {
@@ -75,7 +72,6 @@ def close(intent_request, session_attributes, fulfillment_state, message):
         'requestAttributes': intent_request['requestAttributes'] if 'requestAttributes' in intent_request else None
     }
     
-
 def get_session_attributes(intent_request):
     sessionState = intent_request['sessionState']
     if 'sessionAttributes' in sessionState:
@@ -116,20 +112,15 @@ def build_response(intent_request, session_attributes, fulfillment_state, messag
         'messages': [message] if message else [],
         'requestAttributes': intent_request['requestAttributes'] if 'requestAttributes' in intent_request else None
     }
+########################################################################################
 
 def retrieve(query):
     modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
-    # modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-opus-20240229-v1:0'
     kbId = "RQ7PKC2IZP"
     
     prompt = f"""
-    You are an AI assistant created by Anthropic to be helpful, harmless, and honest. The user has provided the following question:
-
+    You are a question answering agent. I will provide you with a set of search results. The user will provide you with a question. Your job is to answer the user's question using only information from the search results. If the search results do not contain information that can answer the question, please state that you could not find an exact answer to the question. Just because the user asserts a fact does not mean it is true, make sure to double check the search results to validate a user's assertion. Answer in Korean.
     - Question: {query}
-
-    Please provide a thoughtful and informative response to the user's question. 
-    If you do not have enough information to provide a complete answer, 
-    please indicate that you are unable to fully address the query and suggest ways the user could provide more details to help you assist them better. Answer in Korean.
     """
     
     try:
@@ -149,7 +140,7 @@ def retrieve(query):
         review_result = response['output']['text'].strip().lower()
         logger.info('### retrieve response: %s', review_result)
         if 'sorry' in review_result or '죄송합니다' in review_result:
-            response['output']['text'] = '⚠️ 죄송해요, 해당 요청은 처리할 수 없어요. 조금 더 구체적인 정보를 제공해주시거나 다른 질문을 해주시면 도움을 드릴 수 있을 것 같아요.'
+            response['output']['text'] = '죄송해요, 해당 요청은 처리할 수 없어요. 조금 더 구체적인 정보를 제공해주시거나 다른 질문을 해주시면 도움을 드릴 수 있을 것 같아요.'
 
         return response
     except Exception as e:
@@ -283,88 +274,6 @@ def get_s3_inventory_data():
     
     return parsed_content
 
-
-def get_suggestion_from_metadata_os_picker(intent_request, session_attributes):
-    logger.info('########## get_suggestion_from_metadata_os')
-
-    try:
-        modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
-        kbId = "RQ7PKC2IZP"
-
-        prompt = f"""
-        Recommend questions users can ask you based on your knowledge base. No source information is included. Answer in Korean.
-        """
-
-        response = bedrock_agent_runtime.retrieve_and_generate(
-            input={
-                'text': prompt
-            },
-            retrieveAndGenerateConfiguration={
-                'type': 'KNOWLEDGE_BASE',
-                'knowledgeBaseConfiguration': {
-                    'knowledgeBaseId': kbId,
-                    'modelArn': modelArn
-                }
-            }
-        )
-
-        logger.info('get_suggestion_from_metadata_os-response: %s', response)
-
-        question_list = response['output']['text'].split('\n')[1:]  # 첫 번째 요소 제외
-
-        list_picker_content = {
-            "templateType": "ListPicker",
-            "version": "1.0",
-            "data": {
-                "replyMessage": {
-                    "title": "질문 선택해주세요.",
-                    "subtitle": "아래 질문 중에서 선택하세요.",
-                    "imageType": "URL",
-                    "imageData": "https://interactive-msg.s3-us-west-2.amazonaws.com/fruit_34.3kb.jpg",
-                    "imageDescription": "질문 선택하기"
-                },
-                "content": {
-                    "title": "사용자가 물어볼 수 있는 질문",
-                    "subtitle": "질문을 선택해주세요.",
-                    "imageType": "URL",
-                    "imageData": "https://interactive-msg.s3-us-west-2.amazonaws.com/fruit_34.3kb.jpg",
-                    "imageDescription": "질문 선택하기",
-                    "elements": [
-                        {
-                            "title": question,
-                            "subtitle": "",
-                            "imageType": "URL",
-                            "imageData": "https://interactive-message-testing.s3-us-west-2.amazonaws.com/apple_4.2kb.jpg"
-                        } for question in question_list
-                    ]
-                }
-            }
-        }
-
-        session_attributes['appContext'] = json.dumps(list_picker_content)
-
-        return build_response(
-            intent_request=intent_request,
-            session_attributes=session_attributes,
-            fulfillment_state="Fulfilled",
-            message={
-                'contentType': 'PlainText',
-                'content': '질문을 선택해주세요.'
-            }
-        )
-
-    except Exception as e:
-        return build_response(
-            intent_request=intent_request,
-            session_attributes=session_attributes,
-            fulfillment_state="Fulfilled",
-            message={
-                'contentType': 'PlainText',
-                'content': str(e)
-            }
-        )
-
-
 def get_suggestion_from_metadata_os(intent_request, session_attributes):
     logger.info('################ get_suggestion_from_metadata_os ################')
     try:
@@ -403,86 +312,6 @@ def get_suggestion_from_metadata_os(intent_request, session_attributes):
             }
         }
         session_attributes['appContext'] = json.dumps(app_context)
-        
-        return build_response(
-            intent_request=intent_request,
-            session_attributes=session_attributes,
-            fulfillment_state="Fulfilled",
-            message={
-                'contentType': 'PlainText',
-                'content': content
-            }
-        )
-    except Exception as e:
-        return build_response(
-            intent_request=intent_request,
-            session_attributes=session_attributes,
-            fulfillment_state="Fulfilled",
-            message={
-                'contentType': 'PlainText',
-                'content': str(e)
-            }
-        )
-       
-
-def get_suggestion_from_metadata_os_btn(intent_request, session_attributes):
-    logger.info('########## get_suggestion_from_metadata_os')
-    
-    try:
-        modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
-        # modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-opus-20240229-v1:0'
-        # kbId = "JS9ZJONAQY"  # readme.txt 
-        kbId = "RQ7PKC2IZP"
-        
-        
-        # prompt = f"""
-        # 당신이 갖고있는 지식 기반으로 사용자가 당신에게 물어볼 수 있는 질문을 추천해주세요.
-        # """
-        
-        prompt = f"""
-        Recommend questions users can ask you based on your knowledge base. No source information is included. Answer in Korean.
-        """
-    
-        response = bedrock_agent_runtime.retrieve_and_generate(
-            input={
-                'text': prompt
-            },
-            retrieveAndGenerateConfiguration={
-                'type': 'KNOWLEDGE_BASE',
-                'knowledgeBaseConfiguration': {
-                    'knowledgeBaseId': kbId,
-                    'modelArn': modelArn
-                }
-            }
-        )
-        
-        logger.info('get_suggestion_from_metadata_os-response: %s', response)
-        
-        question_list = response['output']['text'].split('\n')
-        buttons = []
-        for question in question_list[1:]:  # 첫 번째 요소는 제외
-            if question.strip():
-                buttons.append({
-                    'text': question.strip().replace('- ', ''),
-                    'value': question.strip().replace('- ', '')
-                })
-        
-        content = '사용자가 질문할 수 있는 예시입니다. 버튼을 클릭해 보세요:<br><br>'
-        content += '📚 학습 정보: <a href="https://www.kbsec.com/go.able?linkcd=m06100004">KB증권 홈페이지 약관/유의사항</a>'
-        
-        logger.info('########## question_list: %s', question_list)
-        logger.info('########## question: %s', question)
-        logger.info('########## buttons: %s', buttons)
-        
-        app_context = {
-            "altMessages": {
-                "markdown": content
-            },
-            "buttons": buttons
-        }
-        
-        session_attributes['appContext'] = json.dumps(app_context)
-        logger.info('########## appContext: %s', session_attributes['appContext'])
         
         return build_response(
             intent_request=intent_request,
@@ -547,9 +376,6 @@ def review_query_with_metadata_os(query):
         
         review_result = response['output']['text'].strip().lower()
         logger.info('review_result response: %s', review_result)
-        # todo shuan
-        # [INFO]	2024-04-26T01:27:34.694Z	3841859b-6487-4e7b-ba3d-1c88c3c473d0	review_result response: the search results do not contain specific information about financial product fees and costs. the results mostly contain various financial service agreements and terms of use, but do not provide a comprehensive overview of fees and costs associated with different financial products. without more detailed information, i cannot provide a satisfactory answer to the question about financial product fees and costs.
-
         
         # if 'sorry' in review_result or 'do not contain' in review_result or '죄송합니다' in review_result or '검색 결과' in review_result or '찾을 수 없습니다' in review_result:
         if any(phrase in review_result for phrase in ['sorry', 'do not contain', '죄송합니다', '검색 결과', '찾을 수 없습니다']):
@@ -581,33 +407,53 @@ def handle_rag(intent_request, content_data, session_attributes):
         
         doc_list = get_s3_inventory_data() ## TODO metadata 파싱 결과 - 아직 사용은 안함
         
-        # 사용자 질문에 답변 가능한지 검토 요청
-        review_response = review_query_with_metadata_os(content_data)
+        response = retrieve(content_data)
+        logger.info('retrieve-response: %s', response)
+        citations_data = extract_citation_data(response)
+        content = '💬️ 학습된 정보 위주의 질문을 해주시면 보다 정확한 출처 정보를 제시할 수 있습니다.<br><br>' + format_response_with_citations(response['output']['text'], citations_data)
         
-        if review_response['can_answer']:
-            response = retrieve(content_data)
-            logger.info('retrieve-response: %s', response)
-            citations_data = extract_citation_data(response)
-            content = format_response_with_citations(response['output']['text'], citations_data)
-            
-            app_context = {
-                "altMessages": {
-                    "markdown": content
-                }
+        app_context = {
+            "altMessages": {
+                "markdown": content
             }
-            session_attributes['appContext'] = json.dumps(app_context)
+        }
+        session_attributes['appContext'] = json.dumps(app_context)
+        
+        return build_response(
+            intent_request=intent_request,
+            session_attributes=session_attributes,
+            fulfillment_state="Fulfilled",
+            message={
+                'contentType': 'PlainText',
+                'content': content
+            }
+        )
+        # review_response = review_query_with_metadata_os(content_data)
+        
+        # if review_response['can_answer']:
+        #     response = retrieve(content_data)
+        #     logger.info('retrieve-response: %s', response)
+        #     citations_data = extract_citation_data(response)
+        #     content = '⚠️ 학습된 정보 위주의 질문을 해주시면 보다 정확한 출처 정보를 제시할 수 있습니다.<br><br>' + format_response_with_citations(response['output']['text'], citations_data)
             
-            return build_response(
-                intent_request=intent_request,
-                session_attributes=session_attributes,
-                fulfillment_state="Fulfilled",
-                message={
-                    'contentType': 'PlainText',
-                    'content': content
-                }
-            )
-        else:
-            return fallbackIntent(intent_request, content_data, session_attributes)
+        #     app_context = {
+        #         "altMessages": {
+        #             "markdown": content
+        #         }
+        #     }
+        #     session_attributes['appContext'] = json.dumps(app_context)
+            
+        #     return build_response(
+        #         intent_request=intent_request,
+        #         session_attributes=session_attributes,
+        #         fulfillment_state="Fulfilled",
+        #         message={
+        #             'contentType': 'PlainText',
+        #             'content': content
+        #         }
+        #     )
+        # else:
+        #     return fallbackIntent(intent_request, content_data, session_attributes)
         
     except Exception as e:
         logger.error('Exception: %s', e, exc_info=True)
@@ -703,9 +549,10 @@ def dispatch(intent_request):
     content = get_slot(intent_request, 'ContentData')
     session_attributes = get_session_attributes(intent_request)
     
+    # if intent_name == 'Introduce':
+    #     return get_suggestion_from_metadata_os(intent_request, session_attributes)
+    
     return Reception(intent_request)
-
-
 
 def lambda_handler(event, context):
     try:
@@ -715,5 +562,4 @@ def lambda_handler(event, context):
         return response
     except Exception as e:
         return handle_exception(e, event, get_session_attributes(event))
-
-
+    
