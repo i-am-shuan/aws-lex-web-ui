@@ -13,17 +13,29 @@ from PyPDF2 import PdfReader
 from io import BytesIO
 import boto3
 from urllib.parse import unquote
+from botocore.client import Config
 from botocore.exceptions import ClientError
 from botocore.exceptions import BotoCoreError
 import gzip
 import csv
 import re
+import pprint
+# from langchain.llms.bedrock import Bedrock                               #'typing_extensions' (unknown location)
+# from langchain.retrievers.bedrock import AmazonKnowledgeBasesRetriever   #'typing_extensions' (unknown location)
+
+pp = pprint.PrettyPrinter(indent=2)
+
+
+region = 'us-east-1'
+bedrock_config = Config(connect_timeout=120, read_timeout=120, retries={'max_attempts': 0})
+bedrock_client = boto3.client('bedrock-runtime', region_name = region)
+bedrock_agent_client = boto3.client("bedrock-agent-runtime", config=bedrock_config, region_name = region)
 
 ########################################################################################
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-openai.api_key = os.environ['OPENAI_API']
+# openai.api_key = os.environ['OPENAI_API']
 bedrock_agent_runtime = boto3.client(service_name = "bedrock-agent-runtime")
 ########################################################################################
 
@@ -113,81 +125,89 @@ def build_response(intent_request, session_attributes, fulfillment_state, messag
         'requestAttributes': intent_request['requestAttributes'] if 'requestAttributes' in intent_request else None
     }
 ########################################################################################
-
-def retrieve(query):
-    modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
-    kbId = "RQ7PKC2IZP"
-    
-    prompt = f"""
-    You are a question answering agent. I will provide you with a set of search results. The user will provide you with a question. Your job is to answer the user's question using only information from the search results. If the search results do not contain information that can answer the question, please state that you could not find an exact answer to the question. Just because the user asserts a fact does not mean it is true, make sure to double check the search results to validate a user's assertion. Answer in Korean.
-    - Question: {query}
-    """
-    
+def retrieve_rag(query):
     try:
-        response = bedrock_agent_runtime.retrieve_and_generate(
-            input={
-                'text': prompt,
+        numberOfResults=5
+        kbId = "RQ7PKC2IZP"     # kb-able-talk-s3
+        # kbId = "FUGB5DFAEY"     #kb-able-talk-s3-v1
+        
+        relevant_documents = bedrock_agent_client.retrieve(
+            retrievalQuery= {
+                'text': query
             },
-            retrieveAndGenerateConfiguration={
-                'type': 'KNOWLEDGE_BASE',
-                'knowledgeBaseConfiguration': {
-                    'knowledgeBaseId': kbId,
-                    'modelArn': modelArn
+            knowledgeBaseId=kbId,
+            retrievalConfiguration= {
+                'vectorSearchConfiguration': {
+                    'numberOfResults': numberOfResults,
+                    # 'overrideSearchType': "HYBRID", # optional
                 }
             }
         )
-            
-        review_result = response['output']['text'].strip().lower()
-        logger.info('### retrieve response: %s', review_result)
-        if 'sorry' in review_result or '죄송합니다' in review_result:
-            response['output']['text'] = '죄송해요, 해당 요청은 처리할 수 없어요. 조금 더 구체적인 정보를 제공해주시거나 다른 질문을 해주시면 도움을 드릴 수 있을 것 같아요.'
-
+        
+        return relevant_documents['retrievalResults']
+    except Exception as e:
+        logger.error(e)
+        return {'error': '예기치 않은 오류가 발생했습니다.', 'details': str(e)}
+    
+def retrieve_llm(contexts, query):
+    try:
+        prompt = f"""
+        Human: You are a financial advisor AI system, and provides answers to questions by using fact based and statistical information when possible. 
+        Use the following pieces of information to provide a concise answer to the question enclosed in <question> tags. 
+        If you don't know the answer, just say that you don't know, don't try to make up an answer. And make an answer in Korean. 
+        <context>
+        {contexts}
+        </context>
+        
+        <question>
+        {query}
+        </question>
+        
+        The response should be specific and use statistics or numbers when possible.
+        
+        Assistant:"""
+        
+        
+        
+        # payload with model paramters
+        mistral_payload = json.dumps({
+            "prompt": prompt,
+            "max_tokens":512,
+            "temperature":0.5,
+            "top_k":50,
+            "top_p":0.9
+        })
+        
+        modelId = 'mistral.mistral-7b-instruct-v0:2' # change this to use a different version from the model provider
+        accept = 'application/json'
+        contentType = 'application/json'
+        response = bedrock_client.invoke_model(body=mistral_payload, modelId=modelId, accept=accept, contentType=contentType)
+        
+        
         return response
     except Exception as e:
         logger.error(e)
         return {'error': '예기치 않은 오류가 발생했습니다.', 'details': str(e)}
 
-    
-def format_response_with_citations(text_response, citations_data):
-    try:
-        logger.info('citations_data: %s', citations_data)
-        
-        # 출처 정보가 없을 경우, 기존 응답을 그대로 반환합니다.
-        if not citations_data:
-            return str(text_response)
-        
-        # 중복된 (source_text, source_location) 세트 제거
-        unique_citations = list(set(citations_data))
-        
-        # 출처 정보를 포함하는 문자열을 생성합니다.
-        content = str(text_response) + '<br><br> 📚 <b>출처</b>'
-        num_citations = min(len(unique_citations), 3)  # 최대 3개의 출처만 가져옴
-        
-        for i, (source_text, source_location) in enumerate(unique_citations[:3]):  # 최대 3개의 출처만 처리
-            # 's3://kb-able-talk-s3/test/test.pdf' 형태에서 'test.pdf' 추출
-            file_name = source_location.split('/')[-1]
-            
-            # 출처 텍스트가 00자 이상인 경우 00자까지만 표시하고 '...'을 추가
-            if len(source_text) > 15:
-                source_text = source_text[:15] + '...'
-            
-            s3_url = generate_s3_url(source_location)
-            
-            # 링크 생성
-            citation_string = '<br><b>[{}]</b> <a href="{}" target="\\\\_blank">{}</a> <br>({})'.format(i+1, s3_url, file_name, source_text)
-            
-            # 마지막 출처인 경우에는 쉼표를 추가하지 않습니다.
-            if i < num_citations - 1:
-                citation_string += ', '
-            
-            content += citation_string
-        
-        return content
-    
-    except Exception as e:
-        logger.error('Error in format_response_with_citations: %s', str(e))
-        return str(text_response)  # 예외 발생 시 기존 응답을 그대로 반환
-    
+def extract_uris_and_text(retrieval_results):
+    uris = []
+    texts = []
+    for result in retrieval_results:
+        if 'location' in result and 's3Location' in result['location'] and 'uri' in result['location']['s3Location']:
+            uri = result['location']['s3Location']['uri']
+            uris.append(uri)
+        if 'content' in result and 'text' in result['content']:
+            text = result['content']['text']
+            texts.append(text)
+    return uris, texts
+
+# def extract_uris(retrieval_results):
+#     uris = []
+#     for result in retrieval_results:
+#         if 'location' in result and 's3Location' in result['location'] and 'uri' in result['location']['s3Location']:
+#             uri = result['location']['s3Location']['uri']
+#             uris.append(uri)
+#     return uris
 
 def generate_s3_url(source_location):
     try:
@@ -212,6 +232,85 @@ def generate_s3_url(source_location):
         logger.error(e)
         return None
 
+def generate_accessible_s3_urls(retrieval_results):
+    uris, texts = extract_uris_and_text(retrieval_results)
+    accessible_urls = []
+    html_output = ""
+    processed_files = set()
+
+    for i, uri in enumerate(uris):
+        url = generate_s3_url(uri)
+        file_name = uri.split('/')[-1]
+
+        # 이미 처리된 파일명 SKIP
+        if file_name not in processed_files:
+            processed_files.add(file_name)
+            accessible_urls.append(url)
+            print("@@@@@@texts: ", texts[i])
+            # html_output += f'<a href="{url}" target="_blank">{file_name}</a><br>'
+            
+            # 마우스 오버 시 텍스트 내용 표시
+            html_output += f'<a href="{url}" target="_blank" title="{texts[i]}">{file_name}</a><br>'
+
+            # 클릭 시 팝업 창으로 텍스트 내용 표시
+            # html_output += f'<a href="#" onclick="showTextContent(\'{texts[i]}\'); return false;">{file_name}</a><br>'
+
+            
+            
+
+    # for uri in uris:
+    #     url = generate_s3_url(uri)
+    #     accessible_urls.append(url)
+    #     file_name = uri.split('/')[-1]
+    #     # 이미 처리된 파일명 SKIP
+    #     if file_name not in processed_files:
+    #     accessible_urls.append(url)
+    #     processed_files.add(file_name) # 파일명을 집합에 추가
+    #     html_output += f'<a href="{url}" target="\_blank">{file_name}</a><br>'
+
+    return html_output
+
+
+def format_response_with_citations(text_response, citations_data):
+    try:
+        logger.info('citations_data: %s', citations_data)
+        
+        # 출처 정보가 없을 경우, 기존 응답을 그대로 반환합니다.
+        if not citations_data:
+            return str(text_response)
+        
+        # 중복된 (source_text, source_location) 세트 제거
+        unique_citations = list(set(citations_data))
+        
+        # 출처 정보를 포함하는 문자열을 생성합니다.
+        content = str(text_response) + '<br><br> 📚 <b>출처</b>'
+        num_citations = min(len(unique_citations), 3)  # 최대 3개의 출처만 가져옴
+        
+        for i, (source_text, source_location) in enumerate(unique_citations[:3]):  # 최대 3개의 출처만 처리
+            # 's3://kb-able-talk-s3/test/test.pdf' 형태에서 'test.pdf' 추출
+            file_name = source_location.split('/')[-1]
+            
+            # 출처 텍스트가 00자 이상인 경우 00자까지만 표시하고 '...'을 추가
+            # if len(source_text) > 15:
+            #     source_text = source_text[:15] + '...'
+            
+            s3_url = generate_s3_url(source_location)
+            
+            # 링크 생성
+            citation_string = '<br><b>[{}]</b> <a href="{}" target="\\\\_blank">{}</a> <br>({})'.format(i+1, s3_url, file_name, source_text)
+            
+            # 마지막 출처인 경우에는 쉼표를 추가하지 않습니다.
+            if i < num_citations - 1:
+                citation_string += ', '
+            
+            content += citation_string
+        
+        return content
+    
+    except Exception as e:
+        logger.error('Error in format_response_with_citations: %s', str(e))
+        return str(text_response)  # 예외 발생 시 기존 응답을 그대로 반환
+    
 
 def extract_citation_data(response):
     citations_data = []
@@ -274,22 +373,42 @@ def get_s3_inventory_data():
     
     return parsed_content
 
-def get_suggestion_from_metadata_os(intent_request, session_attributes):
-    logger.info('################ get_suggestion_from_metadata_os ################')
+
+def get_contexts(retrievalResults):
+    contexts = []
+    for retrievedResult in retrievalResults: 
+        contexts.append(retrievedResult['content']['text'])
+    return contexts
+
+def retrieve_qa(intent_request, session_attributes):
     try:
         modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
-        # modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-opus-20240229-v1:0'
-        # kbId = "JS9ZJONAQY"  # readme.txt 
-        kbId = "RQ7PKC2IZP"
+        kbId = "RQ7PKC2IZP" # kb-able-talk-s3
+        # kbId = "FUGB5DFAEY"     #kb-able-talk-s3-v1
         
         
         # prompt = f"""
-        # 당신이 갖고있는 지식 기반으로 사용자가 당신에게 물어볼 수 있는 질문을 추천해주세요.
+        # Recommend questions users can ask you based on your knowledge base. To ensure an accurate answer, please be specific with your question. And no source information is included. Answer in Korean.
         # """
         
+        query = '당신이 갖고 있는 지식기반 정보를 기반으로, 사용자가 일반적으로 당신에게 물어볼 수있는 질문을 10가지 만들어주세요. 질문은 구체적으로 작성합니다.'
         prompt = f"""
-        Recommend questions users can ask you based on your knowledge base. No source information is included. Answer in Korean.
-        """
+        Human: You are a financial advisor AI system, and provides answers to questions by using fact based and statistical information when possible. 
+        Use the following pieces of information to provide a concise answer to the question enclosed in <question> tags. 
+        If you don't know the answer, just say that you don't know, don't try to make up an answer. And make an answer in Korean. 
+        
+        <question>
+        {query}
+        </question>
+        
+        Assistant:"""
+        
+
+        # Human: You are a financial advisor AI system, and provides answers to questions by using fact based and statistical information when possible.
+        # Use the following pieces of information to provide a concise answer to the question enclosed in <question> tags.
+        # If you don't know the answer, just say that you don't know, don't try to make up an answer. And make an answer in Korean.
+        
+        
     
         response = bedrock_agent_runtime.retrieve_and_generate(
             input={
@@ -302,10 +421,25 @@ def get_suggestion_from_metadata_os(intent_request, session_attributes):
                     'modelArn': modelArn
                 }
             }
+            
+            # retrieveAndGenerateConfiguration={
+            #     "knowledgeBaseConfiguration": {
+            #         "knowledgeBaseId": "FUGB5DFAEY",
+            #         "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0",
+            #         "retrievalConfiguration": {
+            #             "vectorSearchConfiguration": {
+            #                 "numberOfResults": 5,
+            #             }
+            #         }
+            #     },
+            #     "type": "KNOWLEDGE_BASE"
+            # }
+            
         )
         
-        content = response['output']['text'] + '<br><br>📚 학습 정보: <a href="https://www.kbsec.com/go.able?linkcd=m06100004">KB증권 홈페이지 약관/유의사항</a>'
-        logger.info('get_suggestion_from_metadata_os-response: %s', response)
+        content = response['output']['text'] + '<br><br><a href="https://www.kbsec.com/go.able?linkcd=m06100004">📚 학습 정보</a>'
+        
+        logger.info('retrieve_qa: %s', response)
         app_context = {
             "altMessages": {
                 "markdown": content
@@ -334,66 +468,12 @@ def get_suggestion_from_metadata_os(intent_request, session_attributes):
         )
        
 
-def review_query_with_metadata_os(query):
+def handle_rag(intent_request, query, session_attributes):
     try:
-        modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
-        # modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-opus-20240229-v1:0'
-        # kbId = "JS9ZJONAQY"  # readme.txt 
-        kbId = "RQ7PKC2IZP"
+        # source_text = None
+        # source_location = None
         
-        # TODO Shuan metadata 자동화 ######
-        # AS-IS: 지금은 수동으로 readme 파일을 등록해놨음 - S3:1, OS:2
-        # s3://kb-able-talk-s3/readme.txt 
-        # [lambda] metadata 파일 읽고 > [lambda] csv.zp 파일 파싱 to text > [lambda] S3 readme.txt 업데이트 > S3 이벤트 트리거
-        # [lambda] readme 파일 읽고   > [lambda] 임베딩 (JS9ZJONAQY)
-        # prompt에 metadata를 녹이려고 했으나, 제한된 INPUT length로 metadata 정보를 바라보는 OS를 별도로 둠
-        # 개선사항: api를 호출할때 document를 첨부할 수 있거나, metadata url을 참조할 수 있게 프롬프팅이 된다면- 별도의 임베딩과 OS는 필요없음 ######
-        
-        # prompt = f"""
-        # 질문: "{query}"
-        # 이 질문에 대한 답변을 제공할 수 있는지 검토해 주세요. 가능하다면 관련 정보를 기반으로 답변을 준비하고, 불가능할 경우 '죄송합니다'라고 응답해 주세요.
-        # """
-        
-        prompt = f"""
-        question: "{query}"
-        Please consider if you can provide an answer to this question. If possible, prepare a response based on relevant information, and if not possible, respond with 'sorry'.
-        No source information is included.
-        """
-    
-        logger.info('prompt: %s', prompt)
-        response = bedrock_agent_runtime.retrieve_and_generate(
-            input={
-                'text': prompt
-            },
-            retrieveAndGenerateConfiguration={
-                'type': 'KNOWLEDGE_BASE',
-                'knowledgeBaseConfiguration': {
-                    'knowledgeBaseId': kbId,
-                    'modelArn': modelArn
-                }
-            }
-        )
-        
-        review_result = response['output']['text'].strip().lower()
-        logger.info('review_result response: %s', review_result)
-        
-        # if 'sorry' in review_result or 'do not contain' in review_result or '죄송합니다' in review_result or '검색 결과' in review_result or '찾을 수 없습니다' in review_result:
-        if any(phrase in review_result for phrase in ['sorry', 'do not contain', '죄송합니다', '검색 결과', '찾을 수 없습니다']):
-            logger.info('[review_query_with_metadata_os] can_answer: False')
-            return {'can_answer': False}
-        else:
-            return {'can_answer': True}
-    except Exception as e:
-        logger.error('Exception: %s', {str(e)})
-        # return {'can_answer': False, 'message': f'질문 검토 중 오류가 발생했습니다: {str(e)}'}
-        return {'can_answer': False}
-    
-def handle_rag(intent_request, content_data, session_attributes):
-    try:
-        source_text = None
-        source_location = None
-        
-        if not content_data:
+        if not query:
             return elicit_slot(
                 session_attributes=session_attributes,
                 intent_name='Reception',
@@ -401,16 +481,36 @@ def handle_rag(intent_request, content_data, session_attributes):
                 slot_to_elicit='ContentData',
                 message={
                     'contentType': 'PlainText',
-                    'content': '⚠️ 이용약관 및 유의사항에 대한 질문을 입력해주세요.'
+                    'content': '⚠️ 내용을 입력해주세요.'
                 }
             )
         
-        doc_list = get_s3_inventory_data() ## TODO metadata 파싱 결과 - 아직 사용은 안함
+        retrieval_results = retrieve_rag(query)
+        print("@@retrieval_results: ", retrieval_results)
         
-        response = retrieve(content_data)
-        logger.info('retrieve-response: %s', response)
-        citations_data = extract_citation_data(response)
-        content = '💬️ 학습된 정보 위주의 질문을 해주시면 보다 정확한 출처 정보를 제시할 수 있습니다.<br><br>' + format_response_with_citations(response['output']['text'], citations_data)
+        min_score = 0.5  # 최소 점수 임계값 설정
+        filtered_results = [result for result in retrieval_results if result['score'] >= min_score]
+        print("@@filtered_results: ", filtered_results)
+        
+        contexts = get_contexts(filtered_results)
+        print("@@contexts: ", contexts)
+        
+        accessible_urls = generate_accessible_s3_urls(filtered_results)
+        
+        response = retrieve_llm(contexts, query)
+        response_body = json.loads(response.get('body').read())
+        
+        content = response_body.get('outputs')[0]['text']
+        print('@@content: ', content)
+    
+        content = content + '<br><br>📚 <b>출처</b><br>' + accessible_urls
+
+        # TODO Shuan
+        # citations_data = extract_citation_data(response)
+        # learned_info_link = "<a href='https://www.kbsec.com/go.able?linkcd=m06100004' target='_blank'>학습된 정보</a>"
+        # content = f'💬️ {learned_info_link}를 기반으로 질문해주시면 더 정확한 출처를 제공할 수 있습니다.<br><br>' + format_response_with_citations(response['output']['text'], citations_data)
+        
+        
         
         app_context = {
             "altMessages": {
@@ -428,36 +528,10 @@ def handle_rag(intent_request, content_data, session_attributes):
                 'content': content
             }
         )
-        # review_response = review_query_with_metadata_os(content_data)
-        
-        # if review_response['can_answer']:
-        #     response = retrieve(content_data)
-        #     logger.info('retrieve-response: %s', response)
-        #     citations_data = extract_citation_data(response)
-        #     content = '⚠️ 학습된 정보 위주의 질문을 해주시면 보다 정확한 출처 정보를 제시할 수 있습니다.<br><br>' + format_response_with_citations(response['output']['text'], citations_data)
-            
-        #     app_context = {
-        #         "altMessages": {
-        #             "markdown": content
-        #         }
-        #     }
-        #     session_attributes['appContext'] = json.dumps(app_context)
-            
-        #     return build_response(
-        #         intent_request=intent_request,
-        #         session_attributes=session_attributes,
-        #         fulfillment_state="Fulfilled",
-        #         message={
-        #             'contentType': 'PlainText',
-        #             'content': content
-        #         }
-        #     )
-        # else:
-        #     return fallbackIntent(intent_request, content_data, session_attributes)
         
     except Exception as e:
-        logger.error('Exception: %s', e, exc_info=True)
-        return fallbackIntent(intent_request, content_data, session_attributes)
+        logger.exception("An error occurred: %s", str(e))
+        return fallbackIntent(intent_request, query, session_attributes)
 
 def fallbackIntent(intent_request, content_data, session_attributes):
     try:
@@ -516,7 +590,7 @@ def Reception(intent_request):
         content = intent_request['inputTranscript']
         
         if content == '사용 예시를 알려주세요.':
-            return get_suggestion_from_metadata_os(intent_request, session_attributes)
+            return retrieve_qa(intent_request, session_attributes)
         
         
         # '번역' 태스크에 대한 슬롯 값 가져오기
@@ -548,9 +622,6 @@ def dispatch(intent_request):
     intent_name = intent_request['sessionState']['intent']['name']
     content = get_slot(intent_request, 'ContentData')
     session_attributes = get_session_attributes(intent_request)
-    
-    # if intent_name == 'Introduce':
-    #     return get_suggestion_from_metadata_os(intent_request, session_attributes)
     
     return Reception(intent_request)
 
