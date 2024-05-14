@@ -149,45 +149,71 @@ def retrieve_rag(query):
         logger.error(e)
         return {'error': '예기치 않은 오류가 발생했습니다.', 'details': str(e)}
     
-def retrieve_llm(contexts, query):
+def invoke_mistral(prompt):
     try:
-        prompt = f"""
-        Human: You are a financial advisor AI system, and provides answers to questions by using fact based and statistical information when possible. 
-        Use the following pieces of information to provide a concise answer to the question enclosed in <question> tags. 
-        If you don't know the answer, just say that you don't know, don't try to make up an answer. And make an answer in Korean. 
-        <context>
-        {contexts}
-        </context>
-        
-        <question>
-        {query}
-        </question>
-        
-        The response should be specific and use statistics or numbers when possible.
-        
-        Assistant:"""
-        
-        
-        
         # payload with model paramters
         mistral_payload = json.dumps({
             "prompt": prompt,
-            "max_tokens":512,
+            # "max_tokens":512,
+            "max_tokens":3000,
             "temperature":0.5,
             "top_k":50,
             "top_p":0.9
         })
         
-        modelId = 'mistral.mistral-7b-instruct-v0:2' # change this to use a different version from the model provider
+        modelId = 'mistral.mistral-7b-instruct-v0:2'
+        # modelId = 'mistral.mixtral-8x7b-instruct-v0:1'
         accept = 'application/json'
         contentType = 'application/json'
         response = bedrock_client.invoke_model(body=mistral_payload, modelId=modelId, accept=accept, contentType=contentType)
+        response_body = json.loads(response.get('body').read())
         
         
-        return response
+        
+        content = response_body.get('outputs')[0]['text']
+        
+        return content
     except Exception as e:
         logger.error(e)
         return {'error': '예기치 않은 오류가 발생했습니다.', 'details': str(e)}
+
+def invoke_llama(prompt):
+    # https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-runtime_example_bedrock-runtime_Llama3_InvokeLlama_section.html
+    try:
+        llama_prompt = f"""
+        <|begin_of_text|>
+        <|start_header_id|>user<|end_header_id|>
+        {prompt}
+        <|eot_id|>
+        <|start_header_id|>assistant<|end_header_id|>
+        """
+        
+        body = {
+            "prompt": llama_prompt,
+            "temperature": 0.5,
+            "top_p": 0.9,
+            # "max_gen_len": 512,
+            "max_gen_len": 1000
+        }
+
+        response = bedrock_client.invoke_model(body=json.dumps(body), modelId="meta.llama3-8b-instruct-v1:0")
+        response_body = json.loads(response["body"].read())
+        print("#######response_body: ", response_body)
+        
+        response_text = response_body["generation"]
+        response_text = response_text.lower()
+        print("#######response_text: ", response_text)
+
+        if "</assistant>" in response_text:
+            response_text = response_text.split("</assistant>")[0].strip()
+
+
+        return response_text
+
+    except ClientError:
+        logger.error("Couldn't invoke Llama 3")
+        raise
+
 
 def extract_uris_and_text(retrieval_results):
     uris = []
@@ -236,6 +262,7 @@ def generate_accessible_s3_urls(retrieval_results):
     uris, texts = extract_uris_and_text(retrieval_results)
     accessible_urls = []
     html_output = ""
+    first_time = True 
     processed_files = set()
 
     for i, uri in enumerate(uris):
@@ -246,16 +273,22 @@ def generate_accessible_s3_urls(retrieval_results):
         if file_name not in processed_files:
             processed_files.add(file_name)
             accessible_urls.append(url)
-            print("@@@@@@texts: ", texts[i])
-            # html_output += f'<a href="{url}" target="_blank">{file_name}</a><br>'
+            
+            if first_time:
+                html_output += "<br><br>📚 <b>출처</b><br>"
+                first_time = False  # 이후 실행에서는 이 부분이 실행되지 않도록 플래그 변경
+            
+            # 각 파일에 대한 설명을 안전하게 JavaScript 함수 호출에 추가
+            # description = texts[i].replace("'", "\\'").replace('"', '\\"')  # JavaScript에서 안전하게 사용하기 위해 인용문 처리
+            
+            # href 태그와 JavaScript를 함께 사용
+            # html_output += f'<a href="#" onclick="showDescription(\'{description}\')">{file_name}</a><br>'
+            # print("@@@@@@texts: ", description)
+            
+            html_output += f'<a href="{url}" target="_blank">{file_name}</a><br>'
             
             # 마우스 오버 시 텍스트 내용 표시
-            html_output += f'<a href="{url}" target="_blank" title="{texts[i]}">{file_name}</a><br>'
-
-            # 클릭 시 팝업 창으로 텍스트 내용 표시
-            # html_output += f'<a href="#" onclick="showTextContent(\'{texts[i]}\'); return false;">{file_name}</a><br>'
-
-            
+            # html_output += f'<a href="{url}" target="_blank" title="{texts[i]}">{file_name}</a><br>'
             
 
     # for uri in uris:
@@ -267,6 +300,7 @@ def generate_accessible_s3_urls(retrieval_results):
     #     accessible_urls.append(url)
     #     processed_files.add(file_name) # 파일명을 집합에 추가
     #     html_output += f'<a href="{url}" target="\_blank">{file_name}</a><br>'
+
 
     return html_output
 
@@ -388,27 +422,21 @@ def retrieve_qa(intent_request, session_attributes):
         
         
         # prompt = f"""
-        # Recommend questions users can ask you based on your knowledge base. To ensure an accurate answer, please be specific with your question. And no source information is included. Answer in Korean.
+        # Recommend questions users can ask you based on your knowledge base. To ensure an accurate answer, please be specific with your question.
         # """
         
-        query = '당신이 갖고 있는 지식기반 정보를 기반으로, 사용자가 일반적으로 당신에게 물어볼 수있는 질문을 10가지 만들어주세요. 질문은 구체적으로 작성합니다.'
+        # query = 'Based on your knowledge base, come up with 10 questions that users might commonly ask you. Be specific with your questions.'
+        query = 'Recommend questions users can ask you based on your knowledge base. To ensure an accurate answer, please be specific with your question.'
         prompt = f"""
         Human: You are a financial advisor AI system, and provides answers to questions by using fact based and statistical information when possible. 
         Use the following pieces of information to provide a concise answer to the question enclosed in <question> tags. 
-        If you don't know the answer, just say that you don't know, don't try to make up an answer. And make an answer in Korean. 
+        If you don't know the answer, just say that you don't know, don't try to make up an answer. Answers should be provided in Korean.
         
         <question>
         {query}
         </question>
         
         Assistant:"""
-        
-
-        # Human: You are a financial advisor AI system, and provides answers to questions by using fact based and statistical information when possible.
-        # Use the following pieces of information to provide a concise answer to the question enclosed in <question> tags.
-        # If you don't know the answer, just say that you don't know, don't try to make up an answer. And make an answer in Korean.
-        
-        
     
         response = bedrock_agent_runtime.retrieve_and_generate(
             input={
@@ -421,20 +449,6 @@ def retrieve_qa(intent_request, session_attributes):
                     'modelArn': modelArn
                 }
             }
-            
-            # retrieveAndGenerateConfiguration={
-            #     "knowledgeBaseConfiguration": {
-            #         "knowledgeBaseId": "FUGB5DFAEY",
-            #         "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0",
-            #         "retrievalConfiguration": {
-            #             "vectorSearchConfiguration": {
-            #                 "numberOfResults": 5,
-            #             }
-            #         }
-            #     },
-            #     "type": "KNOWLEDGE_BASE"
-            # }
-            
         )
         
         content = response['output']['text'] + '<br><br><a href="https://www.kbsec.com/go.able?linkcd=m06100004">📚 학습 정보</a>'
@@ -497,21 +511,35 @@ def handle_rag(intent_request, query, session_attributes):
         
         accessible_urls = generate_accessible_s3_urls(filtered_results)
         
-        response = retrieve_llm(contexts, query)
-        response_body = json.loads(response.get('body').read())
+        ###### prompt (S) ######
+        prompt = f"""
+        Human: You are a financial advisor AI system, and provides answers to questions by using fact based and statistical information when possible. 
+        Use the following pieces of information to provide a concise answer to the question enclosed in <question> tags. 
+        If you don't know the answer, just say that you don't know, don't try to make up an answer. And make an answer in Korean. 
+        <context>
+        {contexts}
+        </context>
         
-        content = response_body.get('outputs')[0]['text']
-        print('@@content: ', content)
-    
-        content = content + '<br><br>📚 <b>출처</b><br>' + accessible_urls
+        <question>
+        {query}
+        </question>
+        
+        The response should be specific and use statistics or numbers when possible.
+        
+        Assistant:"""
+        ###### prompt (E) ######
+        
+        
+        ###### llm model call (S) ######
+        # https://docs.aws.amazon.com/bedrock/latest/userguide/service_code_examples_bedrock-runtime_invoke_model_examples.html
+        
+        # content = invoke_mistral(prompt) + accessible_urls
+        content = invoke_llama(prompt) + accessible_urls
+        
+        
+        print("@@@@@@@@@@@@@@@@@@content: ", content)
+        ###### llm model call (E) ######
 
-        # TODO Shuan
-        # citations_data = extract_citation_data(response)
-        # learned_info_link = "<a href='https://www.kbsec.com/go.able?linkcd=m06100004' target='_blank'>학습된 정보</a>"
-        # content = f'💬️ {learned_info_link}를 기반으로 질문해주시면 더 정확한 출처를 제공할 수 있습니다.<br><br>' + format_response_with_citations(response['output']['text'], citations_data)
-        
-        
-        
         app_context = {
             "altMessages": {
                 "markdown": content
@@ -592,24 +620,8 @@ def Reception(intent_request):
         if content == '사용 예시를 알려주세요.':
             return retrieve_qa(intent_request, session_attributes)
         
-        
-        # '번역' 태스크에 대한 슬롯 값 가져오기
-        # translation_language = get_slot(intent_request, 'TranslationLanguage') if task_type == '번역' else None
-        
-        # 각 태스크 유형별로 처리할 핸들러 함수를 사전에 매핑
-        # task_handlers = {
-        #     '요약': handle_summary,
-        #     '번역': handle_translation,
-        #     '문구생성': handle_gen_text,
-        #     'sql': handle_gen_sql,
-        #     '기타': handle_etc,
-        #     '문서리뷰': handle_doc_summary,
-        #     'rag': handle_rag
-        # }
-        
-        # return task_handlers[task_type](intent_request, content, session_attributes)
-        
-        
+        # if content == '사용 예시를 알려주세요.':
+        #     content = 'Based on your knowledge base, come up with 10 questions that users might commonly ask you. Be specific with your questions.'
         
         return handle_rag(intent_request, content, session_attributes)
     
