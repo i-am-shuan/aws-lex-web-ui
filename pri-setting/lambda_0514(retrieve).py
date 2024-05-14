@@ -230,38 +230,49 @@ def invoke_llama3_8b(prompt):
         logger.error("Couldn't invoke Llama 3")
         raise
 
-def invoke_llama3_8b_stream(prompt):
-    # https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-runtime_example_bedrock-runtime_Llama3_InvokeModelWithResponseStream_section.html
+def invoke_claude3(prompt):
+    model_id = "anthropic.claude-3-haiku-20240307-v1:0"
+
     try:
-        llama_prompt = f"""
-        <|begin_of_text|>
-        <|start_header_id|>user<|end_header_id|>
-        {prompt}
-        <|eot_id|>
-        <|start_header_id|>assistant<|end_header_id|>
-        """
-        
-        body = {
-            "prompt": llama_prompt,
-            "temperature": 0.5,
-            "top_p": 0.9,
-            "max_gen_len": 2048
-        }
+        response = bedrock_client.invoke_model(
+            modelId=model_id,
+            body=json.dumps(
+                {
+                    "anthropic_version": "bedrock-2023-05-31",
+                    # "max_tokens": 1024,
+                    "max_tokens": 4096,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [{"type": "text", "text": prompt}],
+                        }
+                    ],
+                }
+            ),
+        )
 
-        # response = bedrock_client.invoke_model(body=json.dumps(body), modelId="meta.llama3-8b-instruct-v1:0")
-        response_stream = bedrock_client.invoke_model_with_response_stream(body=json.dumps(body), modelId="meta.llama3-8b-instruct-v1:0")
-        
-        response_text = ""
-        for event in response_stream["body"]:
-            chunk = json.loads(event["chunk"]["bytes"])
-            if "generation" in chunk:
-                print(chunk["generation"], end="")
-                response_text += chunk["generation"]
+        # Process and print the response
+        result = json.loads(response.get("body").read())
+        input_tokens = result["usage"]["input_tokens"]
+        output_tokens = result["usage"]["output_tokens"]
+        output_list = result.get("content", [])
 
-        return response_text
+        # print("Invocation details:")
+        # print(f"- The input length is {input_tokens} tokens.")
+        # print(f"- The output length is {output_tokens} tokens.")
 
-    except ClientError:
-        logger.error("Couldn't invoke Llama 3")
+        # print(f"- The model returned {len(output_list)} response(s):")
+        # for output in output_list:
+        #     print(output["text"])
+
+        return output_list[0]["text"] if output_list else ""
+
+    except ClientError as err:
+        logger.error(
+            "Couldn't invoke Claude 3 Sonnet. Here's why: %s: %s",
+            err.response["Error"]["Code"],
+            err.response["Error"]["Message"],
+        )
         raise
 
 def extract_uris_and_text(retrieval_results):
@@ -574,7 +585,7 @@ def handle_rag(intent_request, query, session_attributes):
         # content = invoke_mistral_7b(prompt) + accessible_urls
         # content = invoke_mixtral_8x7b(prompt) + accessible_urls
         # content = invoke_llama3_8b(prompt) + accessible_urls
-        content = invoke_llama3_8b_stream(prompt) + accessible_urls
+        content = invoke_claude3(prompt) + accessible_urls
         
         print("@@@@@@@@@@@@@@@@@@content: ", content)
         ###### llm model call (E) ######
