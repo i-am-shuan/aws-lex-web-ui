@@ -338,9 +338,8 @@ def generate_accessible_s3_urls(retrieval_results):
                 html_output += "<br><br>📚 <b>출처</b><br>"
                 first_time = False  # 이후 실행에서는 이 부분이 실행되지 않도록 플래그 변경
             
-            
-            html_output += f'<a href="{url}" target="_blank">{file_name}</a><br>'
-            # html_output += f'<a href="{url}" target="_blank" title="{texts[i]}">{file_name}</a><br>'     # 마우스 오버 # output 길이제한 이슈
+            # html_output += f'<a href="{url}" target="_blank">{file_name}</a><br>'
+            html_output += f'<a href="{url}" target="_blank" title="{texts[i]}">{file_name}</a><br>'     # 마우스 오버 # output 길이제한 이슈
             
 
     # for uri in uris:
@@ -536,29 +535,15 @@ def retrieve_qa(intent_request, session_attributes):
 
 def handle_rag(intent_request, query, session_attributes):
     try:
-        if not query:
-            return elicit_slot(
-                session_attributes=session_attributes,
-                intent_name='Reception',
-                slots=get_slots(intent_request),
-                slot_to_elicit='ContentData',
-                message={
-                    'contentType': 'PlainText',
-                    'content': '⚠️ 내용을 입력해주세요.'
-                }
-            )
-        
         retrieval_results = retrieve_rag(query)
         print("@@retrieval_results: ", retrieval_results)
         
-        min_score = 0.5  # 최소 점수 임계값 설정
+        min_score = 0.6  # 최소 점수 임계값 설정
         filtered_results = [result for result in retrieval_results if result['score'] >= min_score]
         print("@@filtered_results: ", filtered_results)
         
         contexts = get_contexts(filtered_results)
         print("@@contexts: ", contexts)
-        
-        accessible_urls = generate_accessible_s3_urls(filtered_results)
         
         ###### prompt (S) ######
         prompt = f"""
@@ -582,10 +567,10 @@ def handle_rag(intent_request, query, session_attributes):
         ###### llm model call (S) ######
         # https://docs.aws.amazon.com/bedrock/latest/userguide/service_code_examples_bedrock-runtime_invoke_model_examples.html
         
-        # content = invoke_mistral_7b(prompt) + accessible_urls
-        # content = invoke_mixtral_8x7b(prompt) + accessible_urls
-        # content = invoke_llama3_8b(prompt) + accessible_urls
-        content = invoke_claude3(prompt) + accessible_urls
+        # content = invoke_mistral_7b(prompt) + generate_accessible_s3_urls(filtered_results)
+        # content = invoke_mixtral_8x7b(prompt) + generate_accessible_s3_urls(filtered_results)
+        # content = invoke_llama3_8b(prompt) + generate_accessible_s3_urls(filtered_results)
+        content = invoke_claude3(prompt) + generate_accessible_s3_urls(filtered_results)
         
         print("@@@@@@@@@@@@@@@@@@content: ", content)
         ###### llm model call (E) ######
