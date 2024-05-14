@@ -149,27 +149,23 @@ def retrieve_rag(query):
         logger.error(e)
         return {'error': '예기치 않은 오류가 발생했습니다.', 'details': str(e)}
     
-def invoke_mistral(prompt):
+def invoke_mistral_7b(prompt):
+    # https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-runtime_example_bedrock-runtime_InvokeMistral7B_section.html
     try:
-        # payload with model paramters
-        mistral_payload = json.dumps({
-            "prompt": prompt,
-            # "max_tokens":512,
-            "max_tokens":3000,
+        instruction = f"<s>[INST] {prompt} [/INST]"
+        body = json.dumps({
+            "prompt": instruction,
+            "max_tokens":4096,
             "temperature":0.5,
             "top_k":50,
             "top_p":0.9
         })
         
-        modelId = 'mistral.mistral-7b-instruct-v0:2'
-        # modelId = 'mistral.mixtral-8x7b-instruct-v0:1'
+        model_id = 'mistral.mistral-7b-instruct-v0:2'
         accept = 'application/json'
         contentType = 'application/json'
-        response = bedrock_client.invoke_model(body=mistral_payload, modelId=modelId, accept=accept, contentType=contentType)
-        response_body = json.loads(response.get('body').read())
-        
-        
-        
+        response = bedrock_client.invoke_model(body=body, modelId=model_id, accept=accept, contentType=contentType)
+        response_body = json.loads(response["body"].read())
         content = response_body.get('outputs')[0]['text']
         
         return content
@@ -177,7 +173,32 @@ def invoke_mistral(prompt):
         logger.error(e)
         return {'error': '예기치 않은 오류가 발생했습니다.', 'details': str(e)}
 
-def invoke_llama(prompt):
+def invoke_mixtral_8x7b(prompt):
+    # https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-runtime_example_bedrock-runtime_InvokeMixtral8x7B_section.html
+    try:
+        instruction = f"<s>[INST] {prompt} [/INST]"
+        body = json.dumps({
+            "prompt": instruction,
+            "max_tokens":200,
+            "temperature":0.5,
+            "top_k":50,
+            "top_p":0.9
+        })
+        
+        model_id = "mistral.mixtral-8x7b-instruct-v0:1"
+        accept = 'application/json'
+        contentType = 'application/json'
+        response = bedrock_client.invoke_model(body=body, modelId=model_id, accept=accept, contentType=contentType)
+        response_body = json.loads(response["body"].read())
+        content = response_body.get('outputs')[0]['text']
+        
+        return content
+    except Exception as e:
+        logger.error(e)
+        return {'error': '예기치 않은 오류가 발생했습니다.', 'details': str(e)}
+
+
+def invoke_llama3_8b(prompt):
     # https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-runtime_example_bedrock-runtime_Llama3_InvokeLlama_section.html
     try:
         llama_prompt = f"""
@@ -192,8 +213,7 @@ def invoke_llama(prompt):
             "prompt": llama_prompt,
             "temperature": 0.5,
             "top_p": 0.9,
-            # "max_gen_len": 512,
-            "max_gen_len": 1000
+            "max_gen_len": 2048
         }
 
         response = bedrock_client.invoke_model(body=json.dumps(body), modelId="meta.llama3-8b-instruct-v1:0")
@@ -204,16 +224,45 @@ def invoke_llama(prompt):
         response_text = response_text.lower()
         print("#######response_text: ", response_text)
 
-        if "</assistant>" in response_text:
-            response_text = response_text.split("</assistant>")[0].strip()
-
-
         return response_text
 
     except ClientError:
         logger.error("Couldn't invoke Llama 3")
         raise
 
+def invoke_llama3_8b_stream(prompt):
+    # https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-runtime_example_bedrock-runtime_Llama3_InvokeModelWithResponseStream_section.html
+    try:
+        llama_prompt = f"""
+        <|begin_of_text|>
+        <|start_header_id|>user<|end_header_id|>
+        {prompt}
+        <|eot_id|>
+        <|start_header_id|>assistant<|end_header_id|>
+        """
+        
+        body = {
+            "prompt": llama_prompt,
+            "temperature": 0.5,
+            "top_p": 0.9,
+            "max_gen_len": 2048
+        }
+
+        # response = bedrock_client.invoke_model(body=json.dumps(body), modelId="meta.llama3-8b-instruct-v1:0")
+        response_stream = bedrock_client.invoke_model_with_response_stream(body=json.dumps(body), modelId="meta.llama3-8b-instruct-v1:0")
+        
+        response_text = ""
+        for event in response_stream["body"]:
+            chunk = json.loads(event["chunk"]["bytes"])
+            if "generation" in chunk:
+                print(chunk["generation"], end="")
+                response_text += chunk["generation"]
+
+        return response_text
+
+    except ClientError:
+        logger.error("Couldn't invoke Llama 3")
+        raise
 
 def extract_uris_and_text(retrieval_results):
     uris = []
@@ -278,17 +327,9 @@ def generate_accessible_s3_urls(retrieval_results):
                 html_output += "<br><br>📚 <b>출처</b><br>"
                 first_time = False  # 이후 실행에서는 이 부분이 실행되지 않도록 플래그 변경
             
-            # 각 파일에 대한 설명을 안전하게 JavaScript 함수 호출에 추가
-            # description = texts[i].replace("'", "\\'").replace('"', '\\"')  # JavaScript에서 안전하게 사용하기 위해 인용문 처리
-            
-            # href 태그와 JavaScript를 함께 사용
-            # html_output += f'<a href="#" onclick="showDescription(\'{description}\')">{file_name}</a><br>'
-            # print("@@@@@@texts: ", description)
             
             html_output += f'<a href="{url}" target="_blank">{file_name}</a><br>'
-            
-            # 마우스 오버 시 텍스트 내용 표시
-            # html_output += f'<a href="{url}" target="_blank" title="{texts[i]}">{file_name}</a><br>'
+            # html_output += f'<a href="{url}" target="_blank" title="{texts[i]}">{file_name}</a><br>'     # 마우스 오버 # output 길이제한 이슈
             
 
     # for uri in uris:
@@ -484,9 +525,6 @@ def retrieve_qa(intent_request, session_attributes):
 
 def handle_rag(intent_request, query, session_attributes):
     try:
-        # source_text = None
-        # source_location = None
-        
         if not query:
             return elicit_slot(
                 session_attributes=session_attributes,
@@ -533,9 +571,10 @@ def handle_rag(intent_request, query, session_attributes):
         ###### llm model call (S) ######
         # https://docs.aws.amazon.com/bedrock/latest/userguide/service_code_examples_bedrock-runtime_invoke_model_examples.html
         
-        # content = invoke_mistral(prompt) + accessible_urls
-        content = invoke_llama(prompt) + accessible_urls
-        
+        # content = invoke_mistral_7b(prompt) + accessible_urls
+        # content = invoke_mixtral_8x7b(prompt) + accessible_urls
+        # content = invoke_llama3_8b(prompt) + accessible_urls
+        content = invoke_llama3_8b_stream(prompt) + accessible_urls
         
         print("@@@@@@@@@@@@@@@@@@content: ", content)
         ###### llm model call (E) ######
