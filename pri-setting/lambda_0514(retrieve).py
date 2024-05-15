@@ -20,6 +20,7 @@ import gzip
 import csv
 import re
 import pprint
+import html
 # from langchain.llms.bedrock import Bedrock                               #'typing_extensions' (unknown location)
 # from langchain.retrievers.bedrock import AmazonKnowledgeBasesRetriever   #'typing_extensions' (unknown location)
 
@@ -35,7 +36,6 @@ bedrock_agent_client = boto3.client("bedrock-agent-runtime", config=bedrock_conf
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# openai.api_key = os.environ['OPENAI_API']
 bedrock_agent_runtime = boto3.client(service_name = "bedrock-agent-runtime")
 ########################################################################################
 
@@ -318,7 +318,7 @@ def generate_s3_url(source_location):
         logger.error(e)
         return None
 
-def generate_accessible_s3_urls(retrieval_results):
+def generate_accessible_s3_urls_back(retrieval_results):
     uris, texts = extract_uris_and_text(retrieval_results)
     accessible_urls = []
     html_output = ""
@@ -355,6 +355,29 @@ def generate_accessible_s3_urls(retrieval_results):
 
     return html_output
 
+def generate_accessible_s3_urls(retrieval_results):
+    uris, texts = extract_uris_and_text(retrieval_results)
+    html_output = ""
+    first_time = True 
+    processed_files = set()
+
+    for i, uri in enumerate(uris):
+        url = generate_s3_url(uri)
+        file_name = uri.split('/')[-1]
+
+        # 이미 처리된 파일명 SKIP
+        if file_name not in processed_files:
+            processed_files.add(file_name)
+            
+            if first_time:
+                html_output += "<br><br>📚 <b>출처</b><br>"
+                first_time = False  # 이후 실행에서는 이 부분이 실행되지 않도록 플래그 변경
+
+            # HTML 특수 문자를 이스케이프 처리
+            escaped_text = html.escape(texts[i])
+            html_output += f'<a href="{url}" target="_blank" title="{escaped_text}">{file_name}</a><br>'
+    
+    return html_output
 
 def format_response_with_citations(text_response, citations_data):
     try:
@@ -478,6 +501,7 @@ def retrieve_qa(intent_request, session_attributes):
         
         # query = 'Based on your knowledge base, come up with 10 questions that users might commonly ask you. Be specific with your questions.'
         query = 'Recommend questions users can ask you based on your knowledge base. To ensure an accurate answer, please be specific with your question.'
+        
         prompt = f"""
         Human: You are a financial advisor AI system, and provides answers to questions by using fact based and statistical information when possible. 
         Use the following pieces of information to provide a concise answer to the question enclosed in <question> tags. 
@@ -573,6 +597,7 @@ def handle_rag(intent_request, query, session_attributes):
         content = invoke_claude3(prompt) + generate_accessible_s3_urls(filtered_results)
         
         print("@@@@@@@@@@@@@@@@@@content: ", content)
+        
         ###### llm model call (E) ######
 
         app_context = {
