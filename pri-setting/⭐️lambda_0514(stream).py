@@ -10,6 +10,8 @@ from PyPDF2 import PdfReader
 from io import BytesIO
 import boto3
 from urllib.parse import unquote
+from urllib.parse import urlparse
+import botocore
 from botocore.client import Config
 from botocore.exceptions import ClientError
 from botocore.exceptions import BotoCoreError
@@ -45,7 +47,6 @@ dynamodb_client = boto3.resource('dynamodb')
 bedrock_runtime = boto3.client(service_name='bedrock-runtime', region_name=AWS_REGION, endpoint_url=ENDPOINT_URL)
 s3 = boto3.client('s3')
 
-
 ##################################################################
 def lambda_handler(event, context):
     try:
@@ -57,17 +58,17 @@ def lambda_handler(event, context):
     except Exception as e:
         return handle_exception(e, event, get_session_attributes(event))
         
-def dispatch(intent_request):
+async def dispatch(intent_request):
     intent_name = intent_request['sessionState']['intent']['name']
     content = get_slot(intent_request, 'ContentData')
     session_attributes = get_session_attributes(intent_request)
     
-    return Reception(intent_request)        
+    return await Reception(intent_request)        
 
 def router(event, context):
     intent_name = event['sessionState']['intent']['name']
     sess_id = event['sessionId']
-    result = get_event_loop().run_until_complete(openai_async_api_handler(event, context))
+    result = asyncio.run(openai_async_api_handler(event, context))
     print(result)
     return result
 
@@ -87,6 +88,7 @@ async def openai_async_api_handler(event, context):
                 }
             ]
         })
+        
         
         session_attributes = get_session_attributes(event)
         print('sessionId ', sessionId)
@@ -156,7 +158,16 @@ async def openai_async_api_handler(event, context):
 
 def update_session_ttl(session_id, new_ttl):
     try:
-        table = dynamodb_client.Table('YourDynamoDBTableName')  # 적절한 DynamoDB 테이블 이름으로 변경
+        table_name = os.environ.get('DYNAMODB_TABLE_NAME', 'kb-able-talk-prod-CodeBuildDeploy-VFBRRXN1GMAF-streaming')  # 환경 변수에서 테이블 이름을 가져옴
+        table = dynamodb_client.Table(table_name)
+        
+        # 항목 존재 여부 확인
+        response = table.get_item(Key={'sessionId': session_id})
+        if 'Item' not in response:
+            logger.error(f"Session ID {session_id} not found in table {table_name}")
+            return
+        
+        # TTL 업데이트
         response = table.update_item(
             Key={'sessionId': session_id},
             UpdateExpression='SET #ttl = :ttl',
@@ -169,6 +180,122 @@ def update_session_ttl(session_id, new_ttl):
 
 
 async def handle_rag(intent_request, query, session_attributes):
+    try:
+        if query == '사용 예시를 알려주세요.':
+            prompt = f"""
+            Human: You are a financial advisor AI system, and provide answers to questions by using fact-based and statistical information when possible.
+            Based on your knowledge base, come up with 10 questions that users might commonly ask you. Be specific with your questions.
+            
+            Assistant:"""
+            
+            # API Gateway Management API 클라이언트 생성
+            sessionId = intent_request['sessionId']
+            wstable = dynamodb_client.Table(session_attributes['streamingDynamoDbTable'])
+            db_response = wstable.get_item(Key={'sessionId': sessionId})
+            connection_id = db_response['Item']['connectionId']
+            apigatewaymanagementapi = boto3.client(
+                'apigatewaymanagementapi', 
+                endpoint_url=session_attributes['streamingEndpoint']
+            )
+            
+            new_ttl = int(time.time()) + 3600
+            update_session_ttl(sessionId, new_ttl)
+            
+            content = await invoke_claude3(prompt, connection_id, apigatewaymanagementapi)
+            logger.info("@@@@@@@@@@@@@@@@@@content: %s", content)
+            
+            app_context = {
+                "altMessages": {
+                    "markdown": content
+                }
+            }
+            session_attributes['appContext'] = json.dumps(app_context)
+            
+            return build_response(
+                intent_request=intent_request,
+                session_attributes=session_attributes,
+                fulfillment_state="Fulfilled",
+                message={
+                    'contentType': 'PlainText',
+                    'content': content
+                }
+            )
+        ##################
+        retrieval_results = retrieve_rag(query)
+        logger.info("@@retrieval_results: %s", retrieval_results)
+        
+        filtered_results = []
+        if query != '사용 예시를 알려주세요.':
+            min_score = 0.6
+            filtered_results = [result for result in retrieval_results if result['score'] >= min_score]
+        logger.info("@@filtered_results: %s", filtered_results)
+        
+        contexts = get_contexts(filtered_results)
+        logger.info("@@contexts: %s", contexts)
+        
+        prompt = f"""
+        Human: You are a financial advisor AI system, and provides answers to questions by using fact based and statistical information when possible. 
+        Use the following pieces of information to provide a concise answer to the question enclosed in <question> tags. 
+        If you don't know the answer, just say that you don't know, don't try to make up an answer. And make an answer in Korean. 
+        <context>
+        {contexts}
+        </context>
+        
+        <question>
+        {query}
+        </question>
+        
+        The response should be specific and use statistics or numbers when possible.
+        
+        Assistant:"""
+
+        # DynamoDB 테이블 참조
+        sessionId = intent_request['sessionId']
+        wstable = dynamodb_client.Table(session_attributes['streamingDynamoDbTable'])
+        
+        # DynamoDB에서 connectionId를 가져오기
+        db_response = wstable.get_item(Key={'sessionId': sessionId})
+        logger.info('db_response: %s', db_response)
+        connection_id = db_response['Item']['connectionId']
+        logger.info('Get ConnectionID %s', connection_id)
+
+        # API Gateway Management API 클라이언트 생성
+        apigatewaymanagementapi = boto3.client(
+            'apigatewaymanagementapi', 
+            endpoint_url=session_attributes['streamingEndpoint']
+        )
+        
+        # 세션 TTL 업데이트 (예: 1시간 후 만료)
+        new_ttl = int(time.time()) + 3600
+        update_session_ttl(sessionId, new_ttl)
+        
+        content = await invoke_claude3(prompt, connection_id, apigatewaymanagementapi)
+        content += generate_accessible_s3_urls(filtered_results)
+        logger.info("@@@@@@@@@@@@@@@@@@content: %s", content)
+
+        app_context = {
+            "altMessages": {
+                "markdown": content
+            }
+        }
+        session_attributes['appContext'] = json.dumps(app_context)
+        
+        return build_response(
+            intent_request=intent_request,
+            session_attributes=session_attributes,
+            fulfillment_state="Fulfilled",
+            message={
+                'contentType': 'PlainText',
+                'content': content
+            }
+        )
+        
+    except Exception as e:
+        logger.exception("An error occurred: %s", str(e))
+        return fallbackIntent(intent_request, query, session_attributes)
+
+
+async def handle_rag2(intent_request, query, session_attributes):
     try:
         retrieval_results = retrieve_rag(query)
         logger.info("@@retrieval_results: %s", retrieval_results)
@@ -275,7 +402,7 @@ async def invoke_claude3(prompt, connection_id, apigatewaymanagementapi):
                     if 'delta' in chunk_obj and 'text' in chunk_obj['delta']:
                         text = chunk_obj['delta']['text']
                         full_reply += text
-                        logger.info("Chunk Text: %s", text)
+                        # logger.info("Chunk Text: %s", text)
 
                         # 실시간 스트리밍 데이터 전송
                         try:
@@ -285,7 +412,7 @@ async def invoke_claude3(prompt, connection_id, apigatewaymanagementapi):
                             )
                         except botocore.exceptions.ClientError as e:
                             if e.response['Error']['Code'] == 'GoneException':
-                                logger.error(f"GoneException occurred for connectionId: {connection_id}")
+                                logger.error(f"GoneException occurred for connection_id: {connection_id}")
                                 # 동기적으로 Claude 모델 호출
                                 return invoke_claude3_sync(prompt)
                             else:
@@ -295,7 +422,7 @@ async def invoke_claude3(prompt, connection_id, apigatewaymanagementapi):
 
     except ClientError as err:
         logger.error(
-            "Couldn't invoke Claude 3 Sonnet asynchronously. Here's why: %s: %s",
+            "Couldn't invoke Claude 3 asynchronously. Here's why: %s: %s",
             err.response["Error"]["Code"],
             err.response["Error"]["Message"],
         )
@@ -327,11 +454,11 @@ def invoke_claude3_sync(prompt):
         output_tokens = result["usage"]["output_tokens"]
         output_list = result.get("content", [])
 
-        return output_list[0]["text"] if output_list else ""
+        return '⚠️ 세션이 만료되었습니다. 🔄 브라우저를 새로고침 해주세요. <br><br>'+ output_list[0]["text"] if output_list else ""
 
     except ClientError as err:
         logger.error(
-            "Couldn't invoke Claude 3 Sonnet synchronously. Here's why: %s: %s",
+            "Couldn't invoke Claude 3 synchronously. Here's why: %s: %s",
             err.response["Error"]["Code"],
             err.response["Error"]["Message"],
         )
@@ -382,7 +509,7 @@ def generate_accessible_s3_urls(retrieval_results):
             processed_files.add(file_name)
             
             if first_time:
-                html_output += "<br><br>📚 <b>출처</b><br>"
+                html_output += "<br><br>📖 <b>출처</b><br>"
                 first_time = False
 
             escaped_text = html.escape(texts[i])
@@ -487,82 +614,65 @@ def get_contexts(retrievalResults):
         contexts.append(retrievedResult['content']['text'])
     return contexts
 
-def Reception(intent_request):
+async def Reception(intent_request):
     try:
         logger.info('intent_request: %s', intent_request)
         session_attributes = get_session_attributes(intent_request)
         content = intent_request['inputTranscript']
         
-        # if content == '사용 예시를 알려주세요.':
-        #     return retrieve_qa(intent_request, session_attributes)
+        # todo shuan
+        s3_url = 's3://kb-able-talk-s3/questions.html'
+        public_url = convert_s3_url_to_public_url(s3_url)
         
-        return handle_rag(intent_request, content, session_attributes)
+        
+        if content == '사용 예시를 알려주세요.':
+            content = '🔍 <a href="' + public_url + '"><b>질문예시</b></a>를 확인해보세요.<br>📚 KB증권 약관 관련 학습 정보가 궁금하다면 <b><a href="https://www.kbsec.com/go.able?linkcd=m06100004">여기</a></b>를 참고해주시기 바랍니다.<br>'
+                            
+            app_context = {
+                "altMessages": {
+                    "markdown": content
+                }
+            }
+            session_attributes['appContext'] = json.dumps(app_context)
+            
+            
+            return build_response(
+                intent_request=intent_request,
+                session_attributes=session_attributes,
+                fulfillment_state="Fulfilled",
+                message={
+                    'contentType': 'PlainText',
+                    'content': content
+                }
+            )
+
+        return await handle_rag(intent_request, content, session_attributes)
     
     except Exception as e:
         logger.error(f"Exception occurred: {str(e)}")
         return fallbackIntent(intent_request, content, session_attributes)
 
-def retrieve_qa(intent_request, session_attributes):
-    try:
-        modelArn = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
-        kbId = "RQ7PKC2IZP"
-        
-        query = 'Recommend questions users can ask you based on your knowledge base. To ensure an accurate answer, please be specific with your question.'
-        
-        prompt = f"""
-        Human: You are a financial advisor AI system, and provides answers to questions by using fact based and statistical information when possible. 
-        Use the following pieces of information to provide a concise answer to the question enclosed in <question> tags. 
-        If you don't know the answer, just say that you don't know, don't try to make up an answer. Answers should be provided in Korean.
-        
-        <question>
-        {query}
-        </question>
-        
-        Assistant:"""
-    
-        response = bedrock_agent_runtime.retrieve_and_generate(
-            input={
-                'text': prompt
-            },
-            retrieveAndGenerateConfiguration={
-                'type': 'KNOWLEDGE_BASE',
-                'knowledgeBaseConfiguration': {
-                    'knowledgeBaseId': kbId,
-                    'modelArn': modelArn
-                }
-            }
-        )
-        
-        content = response['output']['text'] + '<br><br><a href="https://www.kbsec.com/go.able?linkcd=m06100004">📚 학습 정보</a>'
-        
-        logger.info('retrieve_qa: %s', response)
-        app_context = {
-            "altMessages": {
-                "markdown": content
-            }
-        }
-        session_attributes['appContext'] = json.dumps(app_context)
-        
-        return build_response(
-            intent_request=intent_request,
-            session_attributes=session_attributes,
-            fulfillment_state="Fulfilled",
-            message={
-                'contentType': 'PlainText',
-                'content': content
-            }
-        )
-    except Exception as e:
-        return build_response(
-            intent_request=intent_request,
-            session_attributes=session_attributes,
-            fulfillment_state="Fulfilled",
-            message={
-                'contentType': 'PlainText',
-                'content': str(e)
-            }
-        )
+def convert_s3_url_to_public_url(s3_url):
+    # S3 URL 파싱
+    parsed_url = urlparse(s3_url)
+    bucket_name = parsed_url.netloc
+    key = parsed_url.path.lstrip('/')
 
+    # S3 클라이언트 생성
+    s3 = boto3.client('s3')
+
+    # S3 객체의 공개 URL 생성
+    public_url = s3.generate_presigned_url(
+        ClientMethod='get_object',
+        Params={
+            'Bucket': bucket_name,
+            'Key': key
+        },
+        ExpiresIn=3600  # 1시간 동안 유효한 URL
+    )
+
+    return public_url
+    
 def handle_exception(e, intent_request, session_attributes):
     """
     이 함수는 예외 상황이 발생했을 때 사용자에게 적절한 응답을 제공합니다.
@@ -601,4 +711,3 @@ def close(intent_request, session_attributes, fulfillment_state, message):
         'sessionId': intent_request['sessionId'],
         'requestAttributes': intent_request['requestAttributes'] if 'requestAttributes' in intent_request else None
     }
-
