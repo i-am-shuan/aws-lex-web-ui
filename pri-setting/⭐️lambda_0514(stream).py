@@ -274,6 +274,8 @@ async def invoke_claude3(prompt, connection_id, apigatewaymanagementapi):
         )
         raise
 
+
+
 def extract_uris_and_text(retrieval_results):
     uris = []
     texts = []
@@ -285,6 +287,7 @@ def extract_uris_and_text(retrieval_results):
             text = result['content']['text']
             texts.append(text)
     return uris, texts
+    
 
 def generate_s3_url(source_location):
     try:
