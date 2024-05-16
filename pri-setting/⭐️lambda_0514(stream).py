@@ -19,6 +19,7 @@ import re
 import pprint
 import html
 import asyncio
+import time
 
 pp = pprint.PrettyPrinter(indent=2)
 
@@ -153,6 +154,19 @@ async def openai_async_api_handler(event, context):
             'body': json.dumps('Internal Server Error')
         }
 
+def update_session_ttl(session_id, new_ttl):
+    try:
+        table = dynamodb_client.Table('YourDynamoDBTableName')  # 적절한 DynamoDB 테이블 이름으로 변경
+        response = table.update_item(
+            Key={'sessionId': session_id},
+            UpdateExpression='SET #ttl = :ttl',
+            ExpressionAttributeNames={'#ttl': 'ttl'},
+            ExpressionAttributeValues={':ttl': new_ttl}
+        )
+        logger.info(f"Updated session TTL for sessionId {session_id} to {new_ttl}")
+    except ClientError as e:
+        logger.error(f"Error updating TTL for sessionId {session_id}: {e}")
+
 
 async def handle_rag(intent_request, query, session_attributes):
     try:
@@ -197,6 +211,10 @@ async def handle_rag(intent_request, query, session_attributes):
             'apigatewaymanagementapi', 
             endpoint_url=session_attributes['streamingEndpoint']
         )
+        
+        # 세션 TTL 업데이트 (예: 1시간 후 만료)
+        new_ttl = int(time.time()) + 3600
+        update_session_ttl(sessionId, new_ttl)
         
         content = await invoke_claude3(prompt, connection_id, apigatewaymanagementapi)
         content += generate_accessible_s3_urls(filtered_results)
@@ -253,27 +271,71 @@ async def invoke_claude3(prompt, connection_id, apigatewaymanagementapi):
                 chunk = stream_event.get("chunk")
                 if chunk:
                     chunk_obj = json.loads(chunk.get("bytes").decode())
-                    logger.info("Chunk Object: %s", chunk_obj)  # Chunk Object 로그 추가
+                    # logger.info("Chunk Object: %s", chunk_obj)
                     if 'delta' in chunk_obj and 'text' in chunk_obj['delta']:
                         text = chunk_obj['delta']['text']
                         full_reply += text
                         logger.info("Chunk Text: %s", text)
 
                         # 실시간 스트리밍 데이터 전송
-                        apigatewaymanagementapi.post_to_connection(
-                            Data=text.encode('utf-8'),
-                            ConnectionId=connection_id
-                        )
+                        try:
+                            apigatewaymanagementapi.post_to_connection(
+                                Data=text.encode('utf-8'),
+                                ConnectionId=connection_id
+                            )
+                        except botocore.exceptions.ClientError as e:
+                            if e.response['Error']['Code'] == 'GoneException':
+                                logger.error(f"GoneException occurred for connectionId: {connection_id}")
+                                # 동기적으로 Claude 모델 호출
+                                return invoke_claude3_sync(prompt)
+                            else:
+                                raise e
+
         return full_reply
 
     except ClientError as err:
         logger.error(
-            "Couldn't invoke Claude 3 Sonnet. Here's why: %s: %s",
+            "Couldn't invoke Claude 3 Sonnet asynchronously. Here's why: %s: %s",
             err.response["Error"]["Code"],
             err.response["Error"]["Message"],
         )
         raise
 
+
+def invoke_claude3_sync(prompt):
+    model_id = "anthropic.claude-3-haiku-20240307-v1:0"
+
+    try:
+        response = bedrock_client.invoke_model(
+            modelId=model_id,
+            body=json.dumps(
+                {
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 4096,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [{"type": "text", "text": prompt}],
+                        }
+                    ],
+                }
+            ),
+        )
+
+        result = json.loads(response.get("body").read())
+        input_tokens = result["usage"]["input_tokens"]
+        output_tokens = result["usage"]["output_tokens"]
+        output_list = result.get("content", [])
+
+        return output_list[0]["text"] if output_list else ""
+
+    except ClientError as err:
+        logger.error(
+            "Couldn't invoke Claude 3 Sonnet synchronously. Here's why: %s: %s",
+            err.response["Error"]["Code"],
+            err.response["Error"]["Message"],
+        )
+        raise
 
 
 def extract_uris_and_text(retrieval_results):
