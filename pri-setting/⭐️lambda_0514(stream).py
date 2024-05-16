@@ -493,8 +493,8 @@ def Reception(intent_request):
         session_attributes = get_session_attributes(intent_request)
         content = intent_request['inputTranscript']
         
-        if content == '사용 예시를 알려주세요.':
-            return retrieve_qa(intent_request, session_attributes)
+        # if content == '사용 예시를 알려주세요.':
+        #     return retrieve_qa(intent_request, session_attributes)
         
         return handle_rag(intent_request, content, session_attributes)
     
