@@ -2,31 +2,26 @@ import boto3
 import os
 import json
 from asyncio import get_event_loop, gather, sleep
-import botocore.exceptions  # Import botocore.exceptions
+import botocore.exceptions
 import openai
-import json
 import random
-import decimal 
-import os
-import json
-import random
-import decimal 
+import decimal
 import logging
 import chardet
 import PyPDF2
 from PyPDF2 import PdfReader
 from io import BytesIO
-import boto3
 from urllib.parse import unquote
 from botocore.exceptions import ClientError
-from botocore.exceptions import BotoCoreError
 import gzip
 import csv
 
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
 AWS_REGION = os.environ["AWS_REGION"]
 ENDPOINT_URL = os.environ.get("ENDPOINT_URL", f'https://bedrock-runtime.{AWS_REGION}.amazonaws.com')
-# modelId = "anthropic.claude-instant-v1" 
-modelId = "anthropic.claude-v2" 
+modelId = "anthropic.claude-3-haiku-20240307-v1:0"
 
 accept = "application/json"
 contentType = "application/json"
@@ -51,12 +46,19 @@ async def openai_async_api_handler(event, context):
     try:
         sessionId = event['sessionId']
         inputTranscript = event['inputTranscript']
+        
+        # JSON payload 구성
         body = json.dumps({
-            "prompt": f"Human: {inputTranscript}\n\nAssistant:",  # 프롬프트 형식 맞춤
-            "max_tokens_to_sample": 1024,
-            "temperature": 0.5,
-            "stop_sequences": ["\n\nHuman:"]
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 1000,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": inputTranscript
+                }
+            ]
         })
+        
         session_attributes = get_session_attributes(event)
         print('sessionId ', sessionId)
         print('inputTranscript ', inputTranscript)
@@ -65,7 +67,7 @@ async def openai_async_api_handler(event, context):
         if 'streamingDynamoDbTable' in session_attributes and 'streamingEndpoint' in session_attributes:
             apigatewaymanagementapi = boto3.client(
                 'apigatewaymanagementapi', 
-                endpoint_url = session_attributes['streamingEndpoint']
+                endpoint_url=session_attributes['streamingEndpoint']
             )
             
             wstable = dynamodb_client.Table(session_attributes['streamingDynamoDbTable'])
@@ -88,14 +90,15 @@ async def openai_async_api_handler(event, context):
                     if chunk:
                         try:
                             chunk_obj = json.loads(chunk.get('bytes').decode())
-                            text = chunk_obj['completion']
-                            fullreply += text
-                            print(text)
-                            apigatewaymanagementapi.post_to_connection(
-                                Data=text.encode('utf-8'),
-                                ConnectionId=connectionId
-                            )
-                        except botocore.exceptions.ClientError as e:  # Correct exception handling
+                            if 'delta' in chunk_obj and 'text' in chunk_obj['delta']:
+                                text = chunk_obj['delta']['text']
+                                fullreply += text
+                                print(text)
+                                apigatewaymanagementapi.post_to_connection(
+                                    Data=text.encode('utf-8'),
+                                    ConnectionId=connectionId
+                                )
+                        except botocore.exceptions.ClientError as e:
                             if e.response['Error']['Code'] == 'GoneException':
                                 print(f"GoneException occurred for connectionId: {connectionId}")
                                 # Handle the connection being gone, e.g., marking the connection as closed in your DB.
@@ -106,7 +109,8 @@ async def openai_async_api_handler(event, context):
                 body=body, modelId=modelId, accept=accept, contentType=contentType
             )
             response_body = json.loads(response["body"].read())
-            fullreply = response_body["completion"]
+            print("Response Body: ", response_body)  # Response Body 로그 추가
+            fullreply = response_body.get("completion", '')  # 안전하게 'completion' 필드 추출
         
         message = {
             'contentType': 'CustomPayload',
@@ -116,13 +120,13 @@ async def openai_async_api_handler(event, context):
         return close(event, session_attributes, fulfillment_state, message)
     except Exception as e:
         logger.exception("An error occurred: %s", str(e))
-        
+        return {
+            'statusCode': 500,
+            'body': json.dumps('Internal Server Error')
+        }
 
 def get_session_attributes(intent_request):
     session_attributes = intent_request['sessionState'].get('sessionAttributes', {})
-    # session_attributes['streamingDynamoDbTable'] = 'kb-able-talk-CodeBuildDeploy-1D4T9T228VY1U-streaming'
-    # session_attributes['streamingEndpoint'] = 'https://rs75le42c7.execute-api.us-east-1.amazonaws.com/dev/'
-    
     session_attributes['streamingDynamoDbTable'] = 'kb-able-talk-prod-CodeBuildDeploy-VFBRRXN1GMAF-streaming'
     session_attributes['streamingEndpoint'] = 'https://oxtu03t1a0.execute-api.us-east-1.amazonaws.com/Prod/'
     
