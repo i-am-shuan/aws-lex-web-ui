@@ -402,11 +402,15 @@ def generate_accessible_s3_urls(retrieval_results):
                 first_time = False
 
             escaped_text = html.escape(texts[i])
-            # html_output += f'<a href="{url}" target="_blank" title="{escaped_text}">{file_name}</a><br>'
-            html_output += f'<a href="{url}">{file_name}</a><br>'
+            if len(escaped_text) > 500:
+                    logger.warning("Escaped text is too long, truncating to 500 characters.")
+                    escaped_text = escaped_text[:500] + '...'
+            html_output += f'<a href="{url}" target="_blank" title="{escaped_text}">{file_name}</a><br>'
+            # html_output += f'<a href="{url}">{file_name}</a><br>'
     
+    print("@@@@@@escaped_text: ", escaped_text)
     return html_output
-
+    
 
 ######################################################################
 
@@ -444,7 +448,6 @@ def build_response(intent_request, session_attributes, fulfillment_state, messag
         'requestAttributes': intent_request['requestAttributes'] if 'requestAttributes' in intent_request else None
     }
 
-# todo shuan
 def fallbackIntent(intent_request, content_data, session_attributes):
     try:
         # logger.info('fallbackIntent-content_data: %s', content_data)
