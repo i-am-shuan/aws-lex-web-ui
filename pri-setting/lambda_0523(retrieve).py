@@ -89,7 +89,6 @@ async def openai_async_api_handler(event, context):
             ]
         })
         
-        
         session_attributes = get_session_attributes(event)
         print('sessionId ', sessionId)
         print('inputTranscript ', inputTranscript)
@@ -177,6 +176,7 @@ def update_session_ttl(session_id, new_ttl):
         logger.info(f"Updated session TTL for sessionId {session_id} to {new_ttl}")
     except ClientError as e:
         logger.error(f"Error updating TTL for sessionId {session_id}: {e}")
+
 
 
 async def handle_rag(intent_request, query, session_attributes):
