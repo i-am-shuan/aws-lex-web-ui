@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgo=">
-    <title>Able Talk</title>
+    <title>KB Able Talk</title>
     <!--  bootstrap CSS -->
     <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css" integrity="sha384-BVYiiSIFeK1dGmJRAkycuHAHRg32OmUcww7on3RYdg4Va+PmSTsz/K68vbdEjh4u" crossorigin="anonymous">
   </head>
@@ -28,6 +28,14 @@
       z-index: 9999;
     }
   </style>
+  <style>
+      .left-aligned-image {
+          width: 100%;
+          height: auto;
+          display: block;
+          margin-left: 0;
+      }
+  </style>
   <body>
     <div class="container-fluid"><!-- main container -->
       <!-- <h1>Able Talk</h1> -->
@@ -41,9 +49,12 @@
               <p>
                 우측 하단의 채팅 아이콘(💬)을 클릭하시면 필요한 정보를 쉽고 빠르게 제공해 드립니다. 
                 <br><br>
-                🔍 <a href="' + public_url + '"><b>[질문예시]</b></a>를 확인해보세요.
+                🔍 <a href="https://kb-able-talk-s3.s3.amazonaws.com/questions.html"><b>[질문예시]</b></a>를 확인해보세요.
                 <br>
                 📚 KB증권 약관 관련 학습 정보가 궁금하다면 <b><a href="https://www.kbsec.com/go.able?linkcd=m06100004">[여기]</a></b>를 참고해주세요.<br>
+                <div class="col-md-12">
+                  <img src="https://kb-able-talk-s3.s3.amazonaws.com/image/kbsec_terms_of_use.png" class="left-aligned-image">
+              </div>
 
                 <!-- <br><br>🤖 적용된 모델: Claude instant v1
                 <br><br>🤔 Claude와 Claude instant, 어떤 점이 다른가요?
