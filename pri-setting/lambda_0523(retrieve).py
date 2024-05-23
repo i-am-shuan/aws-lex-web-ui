@@ -234,6 +234,7 @@ async def handle_rag(intent_request, query, session_attributes):
                 "markdown": content
             }
         }
+        
         session_attributes['appContext'] = json.dumps(app_context)
         
         return build_response(
@@ -250,6 +251,12 @@ async def handle_rag(intent_request, query, session_attributes):
         logger.exception("An error occurred: %s", str(e))
         return fallbackIntent(intent_request, query, session_attributes)
 
+def escape_special_chars(text):
+    try:
+        return html.escape(text)
+    except Exception as e:
+        logger.exception("Error escaping special characters: %s", str(e))
+        return text  # 변환 실패 시 원본 텍스트 반환
 
 async def invoke_claude3(prompt, connection_id, apigatewaymanagementapi):
     model_id = "anthropic.claude-3-haiku-20240307-v1:0"
@@ -395,7 +402,8 @@ def generate_accessible_s3_urls(retrieval_results):
                 first_time = False
 
             escaped_text = html.escape(texts[i])
-            html_output += f'<a href="{url}" target="_blank" title="{escaped_text}">{file_name}</a><br>'
+            # html_output += f'<a href="{url}" target="_blank" title="{escaped_text}">{file_name}</a><br>'
+            html_output += f'<a href="{url}">{file_name}</a><br>'
     
     return html_output
 
