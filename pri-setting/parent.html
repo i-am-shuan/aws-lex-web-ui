@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgo=">
-    <title>KB Able Talk</title>
+    <title>Able Talk</title>
     <!--  bootstrap CSS -->
     <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css" integrity="sha384-BVYiiSIFeK1dGmJRAkycuHAHRg32OmUcww7on3RYdg4Va+PmSTsz/K68vbdEjh4u" crossorigin="anonymous">
   </head>
@@ -30,30 +30,35 @@
   </style>
   <body>
     <div class="container-fluid"><!-- main container -->
-      <h1>KB Able Talk</h1>
+      <!-- <h1>Able Talk</h1> -->
       <p class="lead">
       </p>
       <div class="row">
         <div class="col-md-6">
           <div class="panel panel-warning">
-            <div class="panel-heading">👋 KB Able Talk과 함께 쉽고 빠르게 약관 정보를 검색해 보세요! </div>
+            <div class="panel-heading">👋 Welcome to <b>KB(Knowledge Base)</b> Able Talk!</div>
             <div class="panel-body">
               <p>
-                우측 하단의 채팅 아이콘(💬)을 클릭하시면 필요한 약관 정보를 쉽고 빠르게 제공해 드립니다. 
-                <br>📄 약관: 금융 상품, 주식 선물 옵션, 지급 결제 서비스, 체크카드
-                <br><br>📚 학습 정보: <a href="https://www.kbsec.com/go.able?linkcd=m06100004">KB증권 홈페이지 약관/유의사항</a>
-                <br>⚠️ 학습된 정보 위주의 질문을 해주시면 보다 정확한 출처 정보를 제시할 수 있습니다.
+                우측 하단의 채팅 아이콘(💬)을 클릭하시면 필요한 정보를 쉽고 빠르게 제공해 드립니다. 
+                <br><br>
+                🔍 <a href="' + public_url + '"><b>[질문예시]</b></a>를 확인해보세요.
                 <br>
+                📚 KB증권 약관 관련 학습 정보가 궁금하다면 <b><a href="https://www.kbsec.com/go.able?linkcd=m06100004">[여기]</a></b>를 참고해주세요.<br>
+
+                <!-- <br><br>🤖 적용된 모델: Claude instant v1
+                <br><br>🤔 Claude와 Claude instant, 어떤 점이 다른가요?
+                <br>- Claude: 폭넓고 깊이 있는 지식과 다양한 기능을 가지고 있지만! 속도가 느린 편 🐢
+                <br>- Claude instant: 답변 속도가 빨라서 실시간 대화에 특화!! 🚀✨ -->
               </p>
             </div>
           </div>
         </div>
       </div>
-      <div class="row">
+      <!--<div class="row">
         <div class="col-md-12">
             <img src="https://kb-able-talk-s3.s3.amazonaws.com/image/kb-able-talk-example.png" alt="KB Able Talk Example" class="img-responsive center-block" style="width: 80%;">
         </div>
-    </div>
+    </div>-->
       <!-- <div class="row">
           <div class="col-md-6">
               <div class="panel panel-primary">
@@ -378,6 +383,11 @@
         });
       });
     </script>
-
+    <script type="text/javascript">
+      function showDescription(description) {
+        alert(description);
+      }
+    </script>
+  
   </body>
 </html>
