@@ -231,44 +231,6 @@ def invoke_llama3_8b(prompt):
         logger.error("Couldn't invoke Llama 3")
         raise
 
-# todo Shuan
-def invoke_claude3_stream(prompt):
-    client = boto3.client('bedrock-runtime', region_name='us-east-1')
-    model_id = "anthropic.claude-3-haiku-20240307-v1:0"
-    prompt = body.get('prompt')
-    
-    native_request = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 512,
-        "temperature": 0.5,
-        "messages": [
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": prompt}]
-            }
-        ]
-    }
-    
-    request_payload = json.dumps(native_request)
-    
-    try:
-        streaming_response = client.invoke_model_with_response_stream(
-            modelId=model_id,
-            contentType="application/json",
-            body=request_payload
-        )
-        
-        result = ""
-        for event in streaming_response['body']:
-            chunk = json.loads(event['chunk']['bytes'])
-            print(chunk)
-            if chunk.get("type") == "content.block_delta":
-                result += chunk['delta'].get("text", "")
-    
-    
-    
-
-
 
 def invoke_claude3(prompt):
     model_id = "anthropic.claude-3-haiku-20240307-v1:0"
@@ -617,8 +579,7 @@ def handle_rag(intent_request, query, session_attributes):
         # content = invoke_mistral_7b(prompt) + generate_accessible_s3_urls(filtered_results)
         # content = invoke_mixtral_8x7b(prompt) + generate_accessible_s3_urls(filtered_results)
         # content = invoke_llama3_8b(prompt) + generate_accessible_s3_urls(filtered_results)
-        # content = invoke_claude3(prompt) + generate_accessible_s3_urls(filtered_results)
-        content = invoke_claude3_stream(prompt)    # todo Shuan test
+        content = invoke_claude3(prompt) + generate_accessible_s3_urls(filtered_results)
         
         print("@@@@@@@@@@@@@@@@@@content: ", content)
         
