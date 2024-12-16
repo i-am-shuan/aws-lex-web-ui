@@ -1,18 +1,19 @@
----
+
 
 ## lambda1
 - 비지니스 로직
 - https://github.com/i-am-shuan/aws-lex-web-ui/blob/master/pri-setting/lambda.py%20(main)
 
+
 ![image](https://github.com/user-attachments/assets/7d3f8157-0d74-46fb-9359-db1ff840dc96)
 
----
+
+
 
 ## lambda2
 - 스트림 처리를 위한 AWS API GateWay
 - kb-able-talk-prod-CodeBuildDeploy--StreamingLambda-J1o4RmvrvcqK
 - https://drive.google.com/file/d/1nck6U26AM_fz70g-hc2zOkjR80vaaf7h/view?usp=drive_link
 
----
 
 ![image](https://github.com/user-attachments/assets/f742b012-e4cb-47db-8e35-89afc30756b4)
