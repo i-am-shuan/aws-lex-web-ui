@@ -1,67 +1,507 @@
 import openai
 import json
 import random
-import decimal 
+import decimal
 import os
-import json
-import random
-import decimal 
 import logging
+import chardet
+import PyPDF2
+from PyPDF2 import PdfReader
+from io import BytesIO
 import boto3
+from urllib.parse import unquote
+from urllib.parse import urlparse
+import botocore
+from botocore.client import Config
+from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError
+import gzip
+import csv
+import re
+import pprint
+import html
+import asyncio
+import time
+
+pp = pprint.PrettyPrinter(indent=2)
+
+region = 'us-east-1'
+bedrock_config = Config(connect_timeout=120, read_timeout=120, retries={'max_attempts': 0})
+bedrock_client = boto3.client('bedrock-runtime', region_name=region)
+bedrock_agent_client = boto3.client("bedrock-agent-runtime", config=bedrock_config, region_name=region)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-openai.api_key = os.environ['OPENAI_API']
+bedrock_agent_runtime = boto3.client(service_name="bedrock-agent-runtime")
 
-# Amazon S3 클라이언트 생성
+
+AWS_REGION = os.environ["AWS_REGION"]
+ENDPOINT_URL = os.environ.get("ENDPOINT_URL", f'https://bedrock-runtime.{AWS_REGION}.amazonaws.com')
+modelId = "anthropic.claude-3-haiku-20240307-v1:0"
+
+accept = "application/json"
+contentType = "application/json"
+
+dynamodb_client = boto3.resource('dynamodb')
+bedrock_runtime = boto3.client(service_name='bedrock-runtime', region_name=AWS_REGION, endpoint_url=ENDPOINT_URL)
 s3 = boto3.client('s3')
 
-def elicit_intent(intent_request, session_attributes, message):
-    return {
-        'sessionState': {
-            'dialogAction': {
-                'type': 'ElicitIntent'
-            },
-            'sessionAttributes': session_attributes
-        },
-        'messages': [ message ] if message != None else None,
-        'requestAttributes': intent_request['requestAttributes'] if 'requestAttributes' in intent_request else None
-    }
-
-def elicit_slot(session_attributes, intent_name, slots, slot_to_elicit, message):
-    return {
-        'sessionState': {
-            'dialogAction': {
-                'type': 'ElicitSlot',
-                'slotToElicit': slot_to_elicit,
-                'intentName': intent_name
-            },
-            'intent': {
-                'name': intent_name,
-                'slots': slots,
-                'state': 'InProgress'
-            },
-            'sessionAttributes': session_attributes
-        },
-        'messages': [message] if message else []
-    }
-
-def close(intent_request, session_attributes, fulfillment_state, message):
-    intent_request['sessionState']['intent']['state'] = fulfillment_state
-    return {
-        'sessionState': {
-            'sessionAttributes': session_attributes,
-            'dialogAction': {
-                'type': 'Close'
-            },
-            'intent': intent_request['sessionState']['intent']
-        },
-        'messages': [message],
-        'sessionId': intent_request['sessionId'],
-        'requestAttributes': intent_request['requestAttributes'] if 'requestAttributes' in intent_request else None
-    }
+##################################################################
+def lambda_handler(event, context):
+    try:
+        logger.info('Event: %s', json.dumps(event))
+        
+        loop = asyncio.get_event_loop()
+        response = loop.run_until_complete(dispatch(event))
+        return response
+    except Exception as e:
+        return handle_exception(e, event, get_session_attributes(event))
+        
+async def dispatch(intent_request):
+    intent_name = intent_request['sessionState']['intent']['name']
+    content = get_slot(intent_request, 'ContentData')
+    session_attributes = get_session_attributes(intent_request)
     
+    return await Reception(intent_request)        
+
+def router(event, context):
+    intent_name = event['sessionState']['intent']['name']
+    sess_id = event['sessionId']
+    result = asyncio.run(openai_async_api_handler(event, context))
+    print(result)
+    return result
+
+async def openai_async_api_handler(event, context):
+    try:
+        sessionId = event['sessionId']
+        inputTranscript = event['inputTranscript']
+        
+        # JSON payload 구성
+        body = json.dumps({
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 1000,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": inputTranscript
+                }
+            ]
+        })
+        
+        session_attributes = get_session_attributes(event)
+        print('sessionId ', sessionId)
+        print('inputTranscript ', inputTranscript)
+        fullreply = ''
+        
+        if 'streamingDynamoDbTable' in session_attributes and 'streamingEndpoint' in session_attributes:
+            apigatewaymanagementapi = boto3.client(
+                'apigatewaymanagementapi', 
+                endpoint_url=session_attributes['streamingEndpoint']
+            )
+            
+            wstable = dynamodb_client.Table(session_attributes['streamingDynamoDbTable'])
+            print('wstable: ', wstable)
+            print('wstable-scan: ', wstable.scan())
+            
+            db_response = wstable.get_item(Key={'sessionId': sessionId})
+            print('db_response: ', db_response)
+            connectionId = db_response['Item']['connectionId']
+            print('Get ConnectionID ', connectionId)
+    
+            response = bedrock_runtime.invoke_model_with_response_stream(
+                body=body, modelId=modelId, accept=accept, contentType=contentType
+            )
+            stream = response.get('body')
+    
+            if stream:
+                for streamEvent in stream:
+                    chunk = streamEvent.get('chunk')
+                    if chunk:
+                        try:
+                            chunk_obj = json.loads(chunk.get('bytes').decode())
+                            if 'delta' in chunk_obj and 'text' in chunk_obj['delta']:
+                                text = chunk_obj['delta']['text']
+                                fullreply += text
+                                print(text)
+                                apigatewaymanagementapi.post_to_connection(
+                                    Data=text.encode('utf-8'),
+                                    ConnectionId=connectionId
+                                )
+                        except botocore.exceptions.ClientError as e:
+                            if e.response['Error']['Code'] == 'GoneException':
+                                print(f"GoneException occurred for connectionId: {connectionId}")
+                                # Handle the connection being gone, e.g., marking the connection as closed in your DB.
+                            else:
+                                raise e
+        else:
+            response = bedrock_runtime.invoke_model(
+                body=body, modelId=modelId, accept=accept, contentType=contentType
+            )
+            response_body = json.loads(response["body"].read())
+            print("Response Body: ", response_body)  # Response Body 로그 추가
+            fullreply = response_body.get("completion", '')  # 안전하게 'completion' 필드 추출
+        
+        message = {
+            'contentType': 'CustomPayload',
+            'content': fullreply
+        }
+        fulfillment_state = "Fulfilled"
+        return close(event, session_attributes, fulfillment_state, message)
+    except Exception as e:
+        logger.exception("An error occurred: %s", str(e))
+        return {
+            'statusCode': 500,
+            'body': json.dumps('Internal Server Error')
+        }
+
+def update_session_ttl(session_id, new_ttl):
+    try:
+        table_name = os.environ.get('DYNAMODB_TABLE_NAME', 'kb-able-talk-prod-CodeBuildDeploy-VFBRRXN1GMAF-streaming')  # 환경 변수에서 테이블 이름을 가져옴
+        table = dynamodb_client.Table(table_name)
+        
+        # 항목 존재 여부 확인
+        response = table.get_item(Key={'sessionId': session_id})
+        if 'Item' not in response:
+            logger.error(f"Session ID {session_id} not found in table {table_name}")
+            return
+        
+        # TTL 업데이트
+        response = table.update_item(
+            Key={'sessionId': session_id},
+            UpdateExpression='SET #ttl = :ttl',
+            ExpressionAttributeNames={'#ttl': 'ttl'},
+            ExpressionAttributeValues={':ttl': new_ttl}
+        )
+        logger.info(f"Updated session TTL for sessionId {session_id} to {new_ttl}")
+    except ClientError as e:
+        logger.error(f"Error updating TTL for sessionId {session_id}: {e}")
+
+
+
+async def handle_rag(intent_request, query, session_attributes):
+    try:
+        retrieval_results = retrieve_rag(query)
+        logger.info("@@retrieval_results: %s", retrieval_results)
+        
+        filtered_results = []
+        if query != '사용 예시를 알려주세요.':
+            min_score = 0.9
+            filtered_results = [result for result in retrieval_results if result['score'] >= min_score]
+        logger.info("@@filtered_results: %s", filtered_results)
+        
+        contexts = get_contexts(filtered_results)
+        logger.info("@@contexts: %s", contexts)
+        
+        prompt = f"""
+        Human: 질문을 받으면 다음의 메시지를 반환합니다. <br> 태그부분에는 개행이 되도록 해줘.
+        [KB증권] 마케팅 정보 수신동의
+        <br>
+        고객님, 안녕하세요.
+
+        고객님은 2018년 12월 5일에 KB증권 마케팅 정보 수신에 동의하셨어요. 계속 유지하시면 다양한 혜택과 정보를 받아볼 수 있어요.
+
+        이 이메일은 정보통신망 이용촉진 및 정보보호 등에 관한 법률 제50조 제8항에 따라 고객님께 2년마다 마케팅 정보 수신동의 유지 여부를 확인하기 위해 보내드리고 있습니다.
+
+        ■ 수신동의 철회방법 <br>
+        ① KB증권 홈페이지: 뱅킹/대출 > 개인(신용)정보동의서 <br>
+        ② H-able: 개인(신용)정보동의서(화면번호 #0829) <br>
+        ③ M-able 앱: 고객서비스 > 개인(신용)정보동의서 <br>
+        ④ 전화: KB증권 고객센터(1588-6611) <br>
+
+        본 메일은 발신전용 메일입니다.
+        문의사항은 KB증권 고객센터(1588-6611)로 연락주세요.
+
+        KB증권
+        서울특별시 영등포구 여의나루로 50 | 대표번호 : 1588-6611
+        
+        <question>
+        {query}
+        </question>
+        
+        The response should be specific and use statistics or numbers when possible.
+        
+        Assistant:"""
+
+        sessionId = intent_request['sessionId']
+        wstable = dynamodb_client.Table(session_attributes['streamingDynamoDbTable'])
+        
+        db_response = wstable.get_item(Key={'sessionId': sessionId})
+        logger.info('db_response: %s', db_response)
+        connection_id = db_response['Item']['connectionId']
+        logger.info('Get ConnectionID %s', connection_id)
+
+        apigatewaymanagementapi = boto3.client(
+            'apigatewaymanagementapi', 
+            endpoint_url=session_attributes['streamingEndpoint']
+        )
+        
+        new_ttl = int(time.time()) + 3600
+        update_session_ttl(sessionId, new_ttl)
+        
+        content = await invoke_claude3(prompt, connection_id, apigatewaymanagementapi)
+        content += generate_accessible_s3_urls(filtered_results)
+        logger.info("@@@@@@@@@@@@@@@@@@content: %s", content)
+
+        app_context = {
+            "altMessages": {
+                "markdown": content
+            }
+        }
+        
+        session_attributes['appContext'] = json.dumps(app_context)
+        
+        return build_response(
+            intent_request=intent_request,
+            session_attributes=session_attributes,
+            fulfillment_state="Fulfilled",
+            message={
+                'contentType': 'PlainText',
+                'content': content
+            }
+        )
+        
+    except Exception as e:
+        logger.exception("An error occurred: %s", str(e))
+        return fallbackIntent(intent_request, query, session_attributes)
+
+
+async def handle_rag2(intent_request, query, session_attributes):
+    try:
+        retrieval_results = retrieve_rag(query)
+        logger.info("@@retrieval_results: %s", retrieval_results)
+        
+        filtered_results = []
+        if query != '사용 예시를 알려주세요.':
+            min_score = 0.9
+            filtered_results = [result for result in retrieval_results if result['score'] >= min_score]
+        logger.info("@@filtered_results: %s", filtered_results)
+        
+        contexts = get_contexts(filtered_results)
+        logger.info("@@contexts: %s", contexts)
+        
+        prompt = f"""
+        Human: You are a financial advisor AI system, and provides answers to questions by using fact based and statistical information when possible. 
+        Use the following pieces of information to provide a concise answer to the question enclosed in <question> tags. 
+        If you don't know the answer, just say that you don't know, don't try to make up an answer. And make an answer in Korean. 
+        <context>
+        {contexts}
+        </context>
+        
+        <question>
+        {query}
+        </question>
+        
+        The response should be specific and use statistics or numbers when possible.
+        
+        Assistant:"""
+
+        sessionId = intent_request['sessionId']
+        wstable = dynamodb_client.Table(session_attributes['streamingDynamoDbTable'])
+        
+        db_response = wstable.get_item(Key={'sessionId': sessionId})
+        logger.info('db_response: %s', db_response)
+        connection_id = db_response['Item']['connectionId']
+        logger.info('Get ConnectionID %s', connection_id)
+
+        apigatewaymanagementapi = boto3.client(
+            'apigatewaymanagementapi', 
+            endpoint_url=session_attributes['streamingEndpoint']
+        )
+        
+        new_ttl = int(time.time()) + 3600
+        update_session_ttl(sessionId, new_ttl)
+        
+        content = await invoke_claude3(prompt, connection_id, apigatewaymanagementapi)
+        content += generate_accessible_s3_urls(filtered_results)
+        logger.info("@@@@@@@@@@@@@@@@@@content: %s", content)
+
+        app_context = {
+            "altMessages": {
+                "markdown": content
+            }
+        }
+        
+        session_attributes['appContext'] = json.dumps(app_context)
+        
+        return build_response(
+            intent_request=intent_request,
+            session_attributes=session_attributes,
+            fulfillment_state="Fulfilled",
+            message={
+                'contentType': 'PlainText',
+                'content': content
+            }
+        )
+        
+    except Exception as e:
+        logger.exception("An error occurred: %s", str(e))
+        return fallbackIntent(intent_request, query, session_attributes)
+
+
+
+def escape_special_chars(text):
+    try:
+        return html.escape(text)
+    except Exception as e:
+        logger.exception("Error escaping special characters: %s", str(e))
+        return text  # 변환 실패 시 원본 텍스트 반환
+
+async def invoke_claude3(prompt, connection_id, apigatewaymanagementapi):
+    model_id = "anthropic.claude-3-haiku-20240307-v1:0"
+
+    try:
+        response = await asyncio.to_thread(
+            bedrock_client.invoke_model_with_response_stream,
+            modelId=model_id,
+            body=json.dumps(
+                {
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 4096,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [{"type": "text", "text": prompt}],
+                        }
+                    ],
+                }
+            ),
+        )
+
+        stream = response.get("body")
+        full_reply = ""
+
+        if stream:
+            for stream_event in stream:
+                chunk = stream_event.get("chunk")
+                if chunk:
+                    chunk_obj = json.loads(chunk.get("bytes").decode())
+                    # logger.info("Chunk Object: %s", chunk_obj)
+                    if 'delta' in chunk_obj and 'text' in chunk_obj['delta']:
+                        text = chunk_obj['delta']['text']
+                        full_reply += text
+                        # logger.info("Chunk Text: %s", text)
+
+                        # 실시간 스트리밍 데이터 전송
+                        try:
+                            apigatewaymanagementapi.post_to_connection(
+                                Data=text.encode('utf-8'),
+                                ConnectionId=connection_id
+                            )
+                        except botocore.exceptions.ClientError as e:
+                            if e.response['Error']['Code'] == 'GoneException':
+                                logger.error(f"GoneException occurred for connection_id: {connection_id}")
+                                # 동기적으로 Claude 모델 호출
+                                return invoke_claude3_sync(prompt)
+                            else:
+                                raise e
+
+        return full_reply
+
+    except ClientError as err:
+        logger.error(
+            "Couldn't invoke Claude 3 asynchronously. Here's why: %s: %s",
+            err.response["Error"]["Code"],
+            err.response["Error"]["Message"],
+        )
+        raise
+
+
+def invoke_claude3_sync(prompt):
+    model_id = "anthropic.claude-3-haiku-20240307-v1:0"
+
+    try:
+        response = bedrock_client.invoke_model(
+            modelId=model_id,
+            body=json.dumps(
+                {
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 4096,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [{"type": "text", "text": prompt}],
+                        }
+                    ],
+                }
+            ),
+        )
+
+        result = json.loads(response.get("body").read())
+        input_tokens = result["usage"]["input_tokens"]
+        output_tokens = result["usage"]["output_tokens"]
+        output_list = result.get("content", [])
+
+        return '⚠️ 세션이 만료되었습니다. 🔄 브라우저를 새로고침 해주세요. <br><br>'+ output_list[0]["text"] if output_list else ""
+
+    except ClientError as err:
+        logger.error(
+            "Couldn't invoke Claude 3 synchronously. Here's why: %s: %s",
+            err.response["Error"]["Code"],
+            err.response["Error"]["Message"],
+        )
+        raise
+
+
+def extract_uris_and_text(retrieval_results):
+    uris = []
+    texts = []
+    for result in retrieval_results:
+        if 'location' in result and 's3Location' in result['location'] and 'uri' in result['location']['s3Location']:
+            uri = result['location']['s3Location']['uri']
+            uris.append(uri)
+        if 'content' in result and 'text' in result['content']:
+            text = result['content']['text']
+            texts.append(text)
+    return uris, texts
+    
+
+def generate_s3_url(source_location):
+    try:
+        s3 = boto3.client('s3')
+        bucket_name, key = source_location.replace('s3://', '').split('/', 1)
+        url = s3.generate_presigned_url(
+            ClientMethod='get_object',
+            Params={
+                'Bucket': bucket_name,
+                'Key': key
+            },
+            ExpiresIn=3600
+        )
+        return url
+    except ClientError as e:
+        logger.error(e)
+        return None
+
+def generate_accessible_s3_urls(retrieval_results):
+    uris, texts = extract_uris_and_text(retrieval_results)
+    html_output = ""
+    first_time = True 
+    processed_files = set()
+
+    for i, uri in enumerate(uris):
+        url = generate_s3_url(uri)
+        file_name = uri.split('/')[-1]
+
+        if file_name not in processed_files:
+            processed_files.add(file_name)
+            
+            if first_time:
+                html_output += "<br><br>📖 <b>출처</b><br>"
+                first_time = False
+
+            escaped_text = html.escape(texts[i])
+            if len(escaped_text) > 500:
+                    logger.warning("Escaped text is too long, truncating to 500 characters.")
+                    escaped_text = escaped_text[:500] + '...'
+            html_output += f'<a href="{url}" target="_blank" title="{escaped_text}">{file_name}</a><br>'
+            # html_output += f'<a href="{url}">{file_name}</a><br>'
+    
+    # print("@@@@@@escaped_text: ", escaped_text)
+    return html_output
+    
+
+######################################################################
 
 def get_session_attributes(intent_request):
     sessionState = intent_request['sessionState']
@@ -70,23 +510,16 @@ def get_session_attributes(intent_request):
     else:
         return {}
 
-def get_slots(intent_request):
-    # 'sessionState'의 'intent'에서 'slots' 정보를 추출합니다.
-    return intent_request['sessionState']['intent']['slots']
-    
 def get_slot(intent_request, slotName):
-    # 'slots' 정보를 가져옵니다.
     slots = get_slots(intent_request)
-    
-    # 'slots'가 None이 아니고, 'slotName'이 'slots' 안에 있으며, 해당 슬롯이 None이 아닌 경우,
-    # 'interpretedValue'를 반환합니다.
     if slots is not None and slotName in slots:
         slot = slots[slotName]
-        # 슬롯의 값이 None이 아니고, 'value' 키가 있으며, 'value'가 None이 아닌 경우 'interpretedValue'를 반환합니다.
         if slot is not None and 'value' in slot and slot['value'] is not None:
             return slot['value'].get('interpretedValue')
-    # 위 조건에 맞지 않는 경우, None을 반환합니다.
     return None
+
+def get_slots(intent_request):
+    return intent_request['sessionState']['intent']['slots']
 
 def build_response(intent_request, session_attributes, fulfillment_state, message):
     return {
@@ -104,398 +537,160 @@ def build_response(intent_request, session_attributes, fulfillment_state, messag
         'requestAttributes': intent_request['requestAttributes'] if 'requestAttributes' in intent_request else None
     }
 
-
-
-def handle_doc_summary(intent_request, session_attributes):
-    # 서비스 준비중인 상태 메시지
-    service_unavailable_message = {
-        'contentType': 'PlainText',
-        'content': '서비스 준비중입니다.'
-    }
-    # 'Close' dialog action을 사용하여 메시지 전달
-    return {
-        'dialogAction': {
-            'type': 'Close',
-            'fulfillmentState': 'Fulfilled',
-            'message': service_unavailable_message
-        },
-        'sessionAttributes': session_attributes
-    }    
-    
-###############################################################
-# TODO    
-def handle_doc_summary2(intent_request, session_attributes):
-    # 세션 속성에서 s3 경로와 파일 이름을 추출
-    s3_path = session_attributes.get('s3Path')
-    file_name = session_attributes.get('fileName')
-
-    # 파일 정보가 없으면 사용자에게 문서 업로드 요청
-    if not s3_path or not file_name:
-        return elicit_slot(
-            session_attributes=session_attributes,
-            intent_name=intent_request['sessionState']['intent']['name'],
-            slots=get_slots(intent_request),
-            slot_to_elicit='Document',
-            message={
-                'contentType': 'PlainText',
-                'content': '문서를 업로드해 주세요.'
+def fallbackIntent(intent_request, content_data, session_attributes):
+    try:
+        # logger.info('fallbackIntent-content_data: %s', content_data)
+        response = '⚠️ 세션이 만료되었습니다. 🔄 브라우저를 새로고침 해주세요.'
+        
+        app_context = {
+            "altMessages": {
+                "markdown": response
             }
-        )
-
-    # s3 경로에서 버킷 이름과 키 추출
-    bucket = s3_path.split('/')[2]
-    key = '/'.join(s3_path.split('/')[3:])
+        }
+        session_attributes['appContext'] = json.dumps(app_context)
     
-    try:
-        # S3에서 파일 내용 가져오기
-        response = s3.get_object(Bucket=bucket, Key=key)
-    except s3.exceptions.NoSuchKey:
-        logger.error(f"파일을 찾을 수 없습니다: {e}")
-        # NoSuchKey 오류에 대한 사용자 친화적인 메시지로 응답
-        return close(
-            intent_request,
-            session_attributes,
-            'Failed',
-            {'contentType': 'PlainText', 'content': '요청하신 문서를 찾을 수 없습니다. 파일명을 확인하고 다시 시도해 주세요.'}
-        )
-    except s3.exceptions.ClientError as e:
-        logger.error(f"S3 클라이언트 에러: {e}")
-        if e.response['Error']['Code'] == 'AccessDenied':
-            # 접근 거부 오류에 대한 처리
-            return close(
-                intent_request,
-                session_attributes,
-                'Failed',
-                {'contentType': 'PlainText', 'content': '문서에 접근할 권한이 없습니다. 권한을 확인하고 다시 시도해 주세요.'}
-            )
-        else:
-            # 기타 S3 클라이언트 오류에 대한 처리
-            return close(
-                intent_request,
-                session_attributes,
-                'Failed',
-                {'contentType': 'PlainText', 'content': '문서를 불러오는 동안 문제가 발생했습니다. 관리자에게 문의해 주세요.'}
-            )
-    except Exception as e:
-        logger.error(f"예외 처리: {e}")
-        # 예상치 못한 예외 처리
-        return close(
-            intent_request,
-            session_attributes,
-            'Failed',
-            {'contentType': 'PlainText', 'content': '문서 처리 중 예상치 못한 오류가 발생했습니다.'}
-        )
-
-    # 문서 내용 읽기 성공
-    content_data = response['Body'].read().decode('utf-8')
-
-    try:
-        # OpenAI GPT-3을 사용하여 문서 내용 요약
-        summary_response = openai.Completion.create(
-            model="text-davinci-003",
-            prompt=content_data  # 요약 지시문을 프롬프트에 추가하여 더 나은 요약을 얻을 수 있음
-        )
-
-        # 요약된 내용 추출
-        summary = summary_response.choices[0].text.strip()
-
-        # Lex로 요약된 내용 반환
         return build_response(
-            intent_request,
-            session_attributes,
-            'Fulfilled',
-            {'contentType': 'PlainText', 'content': summary}
-        )
-    except s3.exceptions.NoSuchKey:
-        logger.error("지정된 키가 존재하지 않습니다.")
-        return close(
-            intent_request,
-            session_attributes,
-            'Failed',
-            {'contentType': 'PlainText', 'content': '문서를 찾을 수 없습니다. 문서를 확인하고 다시 시도해 주세요.'}
+            intent_request=intent_request,
+            session_attributes=session_attributes,
+            fulfillment_state="Fulfilled",
+            message={
+                'contentType': 'PlainText',
+                'content': response
+            }
         )
     except Exception as e:
-        # 다른 예외들 처리
-        logger.error(f"예외 발생: {e}")
-        return close(
-            intent_request,
-            session_attributes,
-            'Failed',
-            {'contentType': 'PlainText', 'content': '문서를 처리하는 중 오류가 발생했습니다.'}
-        )
-
-###############################################################
-
-def handle_summary(intent_request, content_data, session_attributes):
-    if not content_data:
-        return elicit_slot(
+        return build_response(
+            intent_request=intent_request,
             session_attributes=session_attributes,
-            intent_name='Reception',
-            slots=get_slots(intent_request),
-            slot_to_elicit='ContentData',
+            fulfillment_state="Fulfilled",
             message={
                 'contentType': 'PlainText',
-                'content': '요약할 내용을 입력해주세요:'
+                'content': str(e)
             }
         )
-    
-    # 요약할 내용이 있는 경우, 요약 수행
-    prompt = [{"role": "system", "content": "다음 내용을 요약해주세요."}, 
-                      {"role": "user", "content": content_data}]
-    llm_response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
-        messages=prompt
-    )
 
-    # 요약된 내용 추출
-    response = llm_response.choices[0].message.content
-
-    # 요약된 내용으로 응답 메시지 구성 후 반환
-    return build_response(
-        intent_request=intent_request,
-        session_attributes=session_attributes,
-        fulfillment_state="Fulfilled",
-        message={
-            'contentType': 'PlainText',
-            'content': response
-        }
-    )
-
-def get_translation_direction(translation_language):
-    language_lower = translation_language.lower()
-    if language_lower in ["korean", "한국어", "한글"]:
-        return "to Korean"
-    elif language_lower in ["english", "영어"]:
-        return "to English"
-    elif language_lower in ["japanese", "일본어", "일본"]:
-        return "to Japanese"
-    else:
-        return "to English"
-    
-def handle_translation(intent_request, content_data, translation_language, session_attributes):
-    # 번역하려는 언어가 유효한지 검사합니다.
-    valid_languages = ["영어", "한글", "일본어", "English", "Korean", "Japanese"]
-    
-    if not translation_language or translation_language not in valid_languages:
-        # 유효하지 않은 경우, 사용자에게 TranslationLanguage 슬롯을 다시 요청합니다.
-        return elicit_slot(
-            session_attributes=session_attributes,
-            intent_name='Reception',
-            slots=get_slots(intent_request),
-            slot_to_elicit='TranslationLanguage',
-            message={
-                'contentType': 'PlainText',
-                'content': '어떤 언어로 번역할까요? (영어, 한글, 일본어)'
-            }
-        ) 
-    
-    # 번역할 내용이 없으면 사용자에게 요청합니다.
-    if not content_data:
-        return elicit_slot(
-            session_attributes=session_attributes,
-            intent_name='Reception',
-            slots=get_slots(intent_request),
-            slot_to_elicit='ContentData',
-            message={
-                'contentType': 'PlainText',
-                'content': '번역할 내용을 입력해주세요:'
+def retrieve_rag(query):
+    try:
+        numberOfResults = 5
+        kbId = "RQ7PKC2IZP"
+        
+        relevant_documents = bedrock_agent_client.retrieve(
+            retrievalQuery= {
+                'text': query
+            },
+            knowledgeBaseId=kbId,
+            retrievalConfiguration= {
+                'vectorSearchConfiguration': {
+                    'numberOfResults': numberOfResults,
+                }
             }
         )
-    
-    translation_direction = get_translation_direction(translation_language)
-    prompt = [
-        {"role": "system", "content": f"Please translate the following content {translation_direction}."},
-        {"role": "user", "content": content_data}
-    ]
-    
-    llm_response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
-        messages=prompt
-    )
+        
+        return relevant_documents['retrievalResults']
+    except Exception as e:
+        logger.error(e)
+        return {'error': '예기치 않은 오류가 발생했습니다.', 'details': str(e)}
 
-    response = llm_response.choices[0].message.content
+def get_contexts(retrievalResults):
+    contexts = []
+    for retrievedResult in retrievalResults: 
+        contexts.append(retrievedResult['content']['text'])
+    return contexts
 
-    return build_response(
-        intent_request=intent_request,
-        session_attributes=session_attributes,
-        fulfillment_state="Fulfilled",
-        message={
-            'contentType': 'PlainText',
-            'content': response
-        }
-    )
-
-def handle_gen_text(intent_request, content_data, session_attributes):
-    if not content_data:
-        return elicit_slot(
-            session_attributes=session_attributes,
-            intent_name='Reception',
-            slots=get_slots(intent_request),
-            slot_to_elicit='ContentData',
-            message={
-                'contentType': 'PlainText',
-                'content': '요구사항을 알려주세요. 🔖예시: KB증권의 VIP고객을 대상으로 감사 인사 메세지를 작성해줘.'
-            }
-        )
-    
-    prompt = [{"role": "system", "content": "다음 내용으로 문구를 생성해주세요. 적절한 이모지도 사용해주세요."}, 
-                      {"role": "user", "content": content_data}]
-    llm_response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
-        messages=prompt
-    )
-
-    response = llm_response.choices[0].message.content
-
-    return build_response(
-        intent_request=intent_request,
-        session_attributes=session_attributes,
-        fulfillment_state="Fulfilled",
-        message={
-            'contentType': 'PlainText',
-            'content': response
-        }
-    )
-
-def handle_gen_sql(intent_request, content_data, session_attributes):
-    if not content_data:
-        return elicit_slot(
-            session_attributes=session_attributes,
-            intent_name='Reception',
-            slots=get_slots(intent_request),
-            slot_to_elicit='ContentData',
-            message={
-                'contentType': 'PlainText',
-                'content': '요구사항을 알려주세요. 🔖예시: 식품의 정보를 담은 테이블과 식품의 주문 정보를 담은 테이블이 있습니다. 테이블에서 생산일자가 2024년 1월인 식품들의 총매출을 조회하는 SQL문을 작성해주세요. 이때 결과는 총매출을 기준으로 내림차순 정렬해주시고 총매출이 같다면 식품 ID를 기준으로 오름차순 정렬해주세요.'
-            }
-        )
-    
-    prompt = [{"role": "system", "content": "당신은 경력 15년차 Database Administrator입니다. 다음의 내용으로 올바르게 동작하는 SQL을 작성해주세요. 그리고 작성한 SQL에 대해 간략하게 설명해주세요."}, 
-                      {"role": "user", "content": content_data}]
-    llm_response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
-        messages=prompt
-    )
-
-    response = llm_response.choices[0].message.content
-
-    return build_response(
-        intent_request=intent_request,
-        session_attributes=session_attributes,
-        fulfillment_state="Fulfilled",
-        message={
-            'contentType': 'PlainText',
-            'content': response
-        }
-    )
-
-
-def handle_etc(intent_request, content_data, session_attributes):
-    if not content_data:
-        return elicit_slot(
-            session_attributes=session_attributes,
-            intent_name='Reception',
-            slots=get_slots(intent_request),
-            slot_to_elicit='ContentData',
-            message={
-                'contentType': 'PlainText',
-                'content': '어떤 것을 도와드릴까요? 🔖예시: 저녁에 먹는 사과는 몸에 해로운가요?'
-            }
-        )
-    
-    prompt = [{"role": "system", "content": "너는 사람들에게 도움이 되는 조수야. 질문에 대해 확인하고 정확하게 답변해줘."}, 
-                      {"role": "user", "content": content_data}]
-    llm_response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
-        messages=prompt
-    )
-
-    response = llm_response.choices[0].message.content
-
-    return build_response(
-        intent_request=intent_request,
-        session_attributes=session_attributes,
-        fulfillment_state="Fulfilled",
-        message={
-            'contentType': 'PlainText',
-            'content': response
-        }
-    )
-
-def Reception(intent_request):
+async def Reception(intent_request):
     try:
         logger.info('intent_request: %s', intent_request)
-        
-        # 대화 상태와 슬롯 값을 가져옴
         session_attributes = get_session_attributes(intent_request)
-        task_type = get_slot(intent_request, 'TaskType').lower()
-        content = get_slot(intent_request, 'ContentData')
+        content = intent_request['inputTranscript']
         
-        # '번역' 태스크에 대한 슬롯 값 가져오기
-        translation_language = get_slot(intent_request, 'TranslationLanguage') if task_type == '번역' else None
+        s3_url = 's3://kb-able-talk-s3/questions.html'
+        public_url = convert_s3_url_to_public_url(s3_url)
         
-        
-        # 각 태스크 유형별로 처리할 핸들러 함수를 사전에 매핑
-        task_handlers = {
-            '요약': handle_summary,
-            '문서리뷰': handle_doc_summary,
-            '번역': handle_translation,
-            '문구생성': handle_gen_text,
-            'sql': handle_gen_sql,
-            '기타': handle_etc
+        if content == '사용 예시를 알려주세요.':
+            return await handle_example_request(intent_request, session_attributes, public_url)
+
+        return await handle_rag(intent_request, content, session_attributes)
+    
+    except Exception as e:
+        logger.error(f"Exception occurred: {str(e)}")
+        return fallbackIntent(intent_request, content, session_attributes)
+
+async def handle_example_request(intent_request, session_attributes, public_url):
+    content = '🔍 <a href="' + public_url + '"><b>질문예시</b></a>를 확인해보세요.<br>📚 KB증권 약관 관련 학습 정보가 궁금하다면 <b><a href="https://www.kbsec.com/go.able?linkcd=m06100004">여기</a></b>를 참고해주시기 바랍니다.<br>'
+                        
+    app_context = {
+        "altMessages": {
+            "markdown": content
         }
-            
-        if task_type == '번역':
-            return task_handlers[task_type](intent_request, content, translation_language, session_attributes)
-        elif task_type == '문서리뷰':
-            return task_handlers[task_type](intent_request, session_attributes)
-        else:
-            return task_handlers[task_type](intent_request, content, session_attributes)    
-            
-
-        # 처리할 수 없는 태스크 유형이 입력된 경우
-        # raise ValueError(f"Unsupported task type: {task_type}")
-        
-    except Exception as e:
-        logger.error('Exception: %s', e, exc_info=True)
-
-def fallbackIntent(intent_request):
-    try:
-        session_attributes = get_session_attributes(intent_request)
-        user_content = intent_request['inputTranscript']
-        messages_prompt = [{"role": "system", "content": '너는 사람들에게 도움이 되는 조수야. 질문에 대해 확인하고 친절하고 이해하기 쉽게 답변해줘.'}]
-        messages_prompt.append({"role": "user", "content": user_content})
-        
-        logger.info('messages_prompt: %s', messages_prompt)
-        response = openai.ChatCompletion.create(model="gpt-3.5-turbo", messages=messages_prompt)
-        logger.info('fallbackIntent response: %s', response)
-        
-        text = response["choices"][0]["message"]["content"]
-        message =  {
-                'contentType': 'PlainText',
-                'content': text
-            }
-        fulfillment_state = "Fulfilled"    
-        return close(intent_request, session_attributes, fulfillment_state, message)
-    except Exception as e:
-        logger.error('Exception: %s', e, exc_info=True)
-
-
-def dispatch(intent_request):
-    intent_name = intent_request['sessionState']['intent']['name']
-    response = None
+    }
+    session_attributes['appContext'] = json.dumps(app_context)
     
-    if intent_name == 'Reception':
-        return Reception(intent_request)
-    elif intent_name == 'FallbackIntent':
-        return fallbackIntent(intent_request)
+    return build_response(
+        intent_request=intent_request,
+        session_attributes=session_attributes,
+        fulfillment_state="Fulfilled",
+        message={
+            'contentType': 'PlainText',
+            'content': content
+        }
+    )
 
-    raise Exception('Intent with name ' + intent_name + ' not supported')
+def convert_s3_url_to_public_url(s3_url):
+    # S3 URL 파싱
+    parsed_url = urlparse(s3_url)
+    bucket_name = parsed_url.netloc
+    key = parsed_url.path.lstrip('/')
 
-def lambda_handler(event, context):
-    # logger.info('Event: %s', json.dumps(event))
-    # logger.info('Function name: %s', context.function_name) #KBSEC
+    # S3 클라이언트 생성
+    s3 = boto3.client('s3')
+
+    # S3 객체의 공개 URL 생성
+    public_url = s3.generate_presigned_url(
+        ClientMethod='get_object',
+        Params={
+            'Bucket': bucket_name,
+            'Key': key
+        },
+        ExpiresIn=3600  # 1시간 동안 유효한 URL
+    )
+
+    return public_url
     
-    response = dispatch(event)
-    return response
+def handle_exception(e, intent_request, session_attributes):
+    """
+    이 함수는 예외 상황이 발생했을 때 사용자에게 적절한 응답을 제공합니다.
+    """
+    logger.error('Exception: %s', e, exc_info=True)
+    error_message = f'처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요. 오류 내용: {str(e)}'
+
+    return build_response(
+        intent_request=intent_request,
+        session_attributes=session_attributes,
+        fulfillment_state="Failed",
+        message={
+            'contentType': 'PlainText',
+            'content': error_message
+        }
+    )
+
+def get_session_attributes(intent_request):
+    session_attributes = intent_request['sessionState'].get('sessionAttributes', {})
+    session_attributes['streamingDynamoDbTable'] = 'kb-able-talk-prod-CodeBuildDeploy-VFBRRXN1GMAF-streaming'
+    session_attributes['streamingEndpoint'] = 'https://oxtu03t1a0.execute-api.us-east-1.amazonaws.com/Prod/'
     
+    print('Session Attributes:', session_attributes)
+    return session_attributes
+
+def close(intent_request, session_attributes, fulfillment_state, message):
+    intent_request['sessionState']['intent']['state'] = fulfillment_state
+    return {
+        'sessionState': {
+            'dialogAction': {
+                'type': 'Close'
+            },
+            'intent': intent_request['sessionState']['intent']
+        },
+        'messages': [message],
+        'sessionId': intent_request['sessionId'],
+        'requestAttributes': intent_request['requestAttributes'] if 'requestAttributes' in intent_request else None
+    }
