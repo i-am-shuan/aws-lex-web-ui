@@ -10,7 +10,7 @@
 
 
 
-## lambda_2
+## lambda_2 (CloudeFormation 생성시, 자동생성)
 - 스트림 처리를 위한 AWS API GateWay
 - kb-able-talk-prod-CodeBuildDeploy--StreamingLambda-J1o4RmvrvcqK
 
