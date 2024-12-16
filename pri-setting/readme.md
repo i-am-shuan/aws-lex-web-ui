@@ -1,6 +1,15 @@
 ---
 
-kb-able-talk-prod-CodeBuildDeploy--StreamingLambda-J1o4RmvrvcqK
+## lambda1
+- 비지니스 로직
+- https://github.com/i-am-shuan/aws-lex-web-ui/blob/master/pri-setting/lambda.py%20(main)
+
+---
+
+## lambda2
+- 스트림 처리를 위한 AWS API GateWay
+- kb-able-talk-prod-CodeBuildDeploy--StreamingLambda-J1o4RmvrvcqK
+- https://drive.google.com/file/d/1nck6U26AM_fz70g-hc2zOkjR80vaaf7h/view?usp=drive_link
 
 ---
 
