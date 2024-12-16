@@ -4,6 +4,8 @@
 - 비지니스 로직
 - https://github.com/i-am-shuan/aws-lex-web-ui/blob/master/pri-setting/lambda.py%20(main)
 
+![image](https://github.com/user-attachments/assets/7d3f8157-0d74-46fb-9359-db1ff840dc96)
+
 ---
 
 ## lambda2
