@@ -1,162 +1,186 @@
-<!doctype html>
+<!DOCTYPE html>
 <html>
-
-<head>
+  <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgo=">
-    <title>KB AbleTalk</title>
+    <title>KB Talk</title>
+    <!--  bootstrap CSS -->
     <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css" integrity="sha384-BVYiiSIFeK1dGmJRAkycuHAHRg32OmUcww7on3RYdg4Va+PmSTsz/K68vbdEjh4u" crossorigin="anonymous">
-</head>
+  </head>
+  <style>
+    /* shuan */
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    
+    .loading-spinner {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background-color: rgba(0, 0, 0, 0.5);
+      color: white;
+      padding: 20px;
+      border-radius: 5px;
+      font-size: 16px;
+      z-index: 9999;
+    }
+  </style>
+  <style>
+      .left-aligned-image {
+          width: 100%;
+          height: auto;
+          display: block;
+          margin-left: 0;
+      }
+  </style>
+  <body>
+    <div class="container-fluid"><!-- main container -->
+      <p class="lead">
+      </p>
+      <div class="row">
+        <div class="col-md-6">
+          <div class="panel panel-warning">
+            <div class="panel-heading">👋 Welcome to <b>KB(Knowledge Base) Talk!</b></div>
+            <div class="panel-body">
+              <p>
+                우측 하단의 채팅 아이콘(💬)을 클릭하시면 필요한 정보를 쉽고 빠르게 제공해 드립니다. 
+                <br><br>
+                🔍 <a href="https://kb-able-talk-s3.s3.amazonaws.com/questions.html"><b>[질문예시]</b></a>를 확인해보세요.
+                <br>
+                📚 KB증권 약관 관련 학습 정보가 궁금하다면 <b><a href="https://www.kbsec.com/go.able?linkcd=m06100004">[여기]</a></b>를 참고해주세요.<br>
+                <div class="col-md-12">
+                  <img src="https://kb-able-talk-s3.s3.amazonaws.com/image/kbsec_terms_of_use.png" class="left-aligned-image">
+              </div>
 
-<body>
-    <div class="container-fluid">
-        <h1>KB AbleTalk</h1>
-        <p class="lead">칼퇴. 꿈은 이루어진다. I AM KB AbleTalk 🤖🚀</p>
-        <div class="row">
-            <div class="col-md-6">
-                <div class="panel panel-primary">
-                    <div class="panel-heading">AbleTalk 대화하기</div>
-                    <div class="panel-body">
-                        <div><button id="send-intent" type="button" class="btn btn-default" disabled="disabled">Send</button></div>
-                    </div>
-                </div>
+                <!-- <br><br>🤖 적용된 모델: Claude instant v1
+                <br><br>🤔 Claude와 Claude instant, 어떤 점이 다른가요?
+                <br>- Claude: 폭넓고 깊이 있는 지식과 다양한 기능을 가지고 있지만! 속도가 느린 편 🐢
+                <br>- Claude instant: 답변 속도가 빨라서 실시간 대화에 특화!! 🚀✨ -->
+              </p>
             </div>
+          </div>
         </div>
-        <div class="row">
-            <div class="col-md-6">
-                <div class="panel panel-primary">
-                    <div class="panel-heading">Lex Dialog State</div>
-                    <div class="panel-body">
-                        <div><strong>dialogState:</strong> <span id="dialog-state"></span></div>
-                    </div>
-                </div>
+      </div>
+      <!--<div class="row">
+        <div class="col-md-12">
+            <img src="https://kb-able-talk-s3.s3.amazonaws.com/image/kb-able-talk-example.png" alt="KB Able Talk Example" class="img-responsive center-block" style="width: 80%;">
+        </div>
+    </div>-->
+      <!-- <div class="row">
+          <div class="col-md-6">
+              <div class="panel panel-primary">
+                <div class="panel-heading">사용 예시 확인하기</div>
+            <div class="panel-body">
+              <div>
+                <button id="send-intent" type="button" class="btn btn-default" disabled>
+                  버튼을 누르면 챗봇이 사용법을 친절하게 안내해 드립니다
+                </button>
+              </div>
             </div>
+          </div>
         </div>
-        <div class="row">
-            <div class="col-md-6">
-                <div class="panel panel-primary">
-                    <div class="panel-heading">Lex Slots</div>
-                    <div class="panel-body">
-                        <div id="slots"></div>
-                    </div>
-                </div>
+      </div>
+
+      <div class="row">
+        <div class="col-md-6">
+          <div class="panel panel-primary">
+            <div class="panel-heading">Dialog State</div>
+            <div class="panel-body">
+              <div>
+                <strong>dialogState:</strong>
+                <span id="dialog-state"></span>
+              </div>
             </div>
+          </div>
         </div>
-        <div class="row">
-            <div class="col-md-6">
-                <div class="panel panel-primary">
-                    <div class="panel-heading">Lex Intent Name</div>
-                    <div class="panel-body">
-                        <div><strong>Intent Name:</strong> <span id="intent-name"></span></div>
-                    </div>
-                </div>
+      </div>
+
+      <div class="row">
+        <div class="col-md-6">
+          <div class="panel panel-primary">
+            <div class="panel-heading">Slots</div>
+            <div class="panel-body">
+              <div id="slots"></div>
             </div>
+          </div>
         </div>
-        <div class="row">
-            <div class="col-md-6">
-                <div class="panel panel-primary">
-                    <div class="panel-heading">Lex Session Attributes</div>
-                    <div class="panel-body">
-                        <div>
-                            <pre id="session-attributes"></pre>
-                        </div>
-                    </div>
-                </div>
+      </div>
+
+      <div class="row">
+        <div class="col-md-6">
+          <div class="panel panel-primary">
+            <div class="panel-heading">Intent Name</div>
+            <div class="panel-body">
+              <div>
+                <strong>Intent Name:</strong>
+                <span id="intent-name"></span>
+              </div>
             </div>
+          </div>
         </div>
-        <div class="row">
-            <div class="col-md-6">
-                <div class="panel panel-primary">
-                    <div class="panel-heading">Lex Response Card</div>
-                    <div class="panel-body">
-                        <div>
-                            <pre id="response-card"></pre>
-                        </div>
-                    </div>
-                </div>
+      </div>
+
+      <div class="row">
+        <div class="col-md-6">
+          <div class="panel panel-primary">
+            <div class="panel-heading">Session Attributes</div>
+            <div class="panel-body">
+              <div>
+                <pre id="session-attributes"></pre>
+              </div>
             </div>
+          </div>
         </div>
-        <div class="row">
-            <div class="col-md-6">
-                <div class="panel panel-warning">
-                    <div class="panel-heading">NOTE</div>
-                    <div class="panel-body">
-                        <p>This application was created using the <a href="https://github.com/awslabs/aws-lex-web-ui">aws-lex-web-ui</a> project.</p>
-                    </div>
-                </div>
+      </div>
+
+      <div class="row">
+        <div class="col-md-6">
+          <div class="panel panel-primary">
+            <div class="panel-heading">Response Card</div>
+            <div class="panel-body">
+              <div>
+                <pre id="response-card"></pre>
+              </div>
             </div>
+          </div>
         </div>
-    </div>
+      </div> -->
+    </div><!-- main container -->
+
+    <!-- jquery used as part on this example - not required by lex-web-ui -->
     <script src="https://code.jquery.com/jquery-3.2.1.min.js" integrity="sha256-hwg4gsxgFZhOsEEamdOYGBf13FyQuiTwlAQgxVSNgt4=" crossorigin="anonymous"></script>
+    <!-- bootstrap used as part of thie example - not required by lex-web-ui -->
     <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/js/bootstrap.min.js" integrity="sha384-Tc5IQib027qvyjSMfHjOMaLkfuWVxZxUPnCJA7l2mCWNIpG9mGCD8wGNIcPD7Txa" crossorigin="anonymous"></script>
-    <script src="lex-web-ui-loader.min.js"></script>
 
+    <!--
+      Loader script tag
 
-    <!-- loader script -->
-    <script src="./lex-web-ui-loader.js"></script>
+      Add a script tag pointing to the loader library towards the bottom
+      of the html BODY section
+
+      The library and its dependencies can be hosted on another site,
+      S3 bucket or a CDN (e.g. CloudFront)
+
+      This script creates a global variable named ChatbotUiLoader which
+      provides the loader library functionality
+
+      Webpack injects the loader script tag here.
+      if you want to include it manually in your app,
+      replace the webpack tag with:
+      <script src="./lex-web-ui-loader.min.js"></script>
+    -->
+    <script src="lex-web-ui-loader.js"></script>
+
+    <!--
+      After the loader script tag has been included, you can use its global
+      variable to load the chatbot UI in an iframe
+    -->
     <script>
-      /*
-        The loader library creates a global object named ChatBotUiLoader
-        It includes the IframeLoader constructor
-        An instance of IframeLoader has the load function which kicks off
-        the load process
-      */
 
-      // options for the loader constructor
-      var loaderOptions = {
-        // you can put the chatbot UI config in a JSON file
-        configUrl: './chatbot-ui-loader-config.json',
-
-        // the full page chatbot UI that will be iframed
-        iframeSrcPath: './chatbot-index.html#/?lexWebUiEmbed=true'
-      };
-
-      // The following statement instantiates the IframeLoader
-      var iframeLoader = new ChatBotUiLoader.IframeLoader(loaderOptions);
-
-      // chatbot UI config
-      // The loader can also obtain these values from other sources such
-      // as a JSON file or events. The configUrl variable in the
-      // loaderOptions above can be used to put these config values in a file
-      // instead of explicitly passing it as an argument.
-      var chatbotUiConfig = {
-        ui: {
-          // origin of the parent site where you are including the chatbot UI
-          // set to window.location.origin since hosting on same site
-          parentOrigin: window.location.origin,
-        },
-        iframe: {
-          // origin hosting the HTML file that will be embedded in the iframe
-          // set to window.location.origin since hosting on same site
-          iframeOrigin: window.location.origin,
-        },
-        cognito: {
-          // Your Cognito Pool Id - this is required to provide AWS credentials
-          poolId: 'ap-northeast-2:bb61a4df-572f-4f91-8548-7222922f9c69'
-        },
-        connect: {
-          contactFlowId : '<your contact flow id>',
-          instanceId : '<your instance id>',
-          apiGatewayEndpoint : '<your api gateway endpoint>',
-        },
-        lex: {
-          // Lex Bot Name in your account
-          botName: 'KBSEC'
-        }
-      };
-
-      // Call the load function which returns a promise that is resolved
-      // once the component is loaded or is rejected if there is an error
-      iframeLoader.load(chatbotUiConfig)
-        .then(function () {
-          console.log('iframe loaded');
-        })
-        .catch(function (err) {
-          console.error(err);
-        });
-    </script>
-<script>// The loader constructor supports various configurable options used to
+      // The loader constructor supports various configurable options used to
       // control how the component configuration and dependencies are retrieved.
       var loaderOpts = {
         // Point the baseUrl option to the the base URL used to download
@@ -203,11 +227,28 @@
       };
 
       // load the iframe
+      // shuan
+      const spinner = document.createElement('div');
+      spinner.classList.add('loading-spinner');
+      spinner.textContent = '💬 Loading.. ';
+      document.body.appendChild(spinner);
+
+      let loadingDots = 0;
+      function updateLoadingText() {
+        spinner.textContent = `💬 Loading${'.'.repeat(loadingDots)}`;
+        loadingDots = (loadingDots + 1) % 4;
+      }
+
+      // 1초 간격으로 로딩 문구 업데이트
+      const loadingInterval = setInterval(updateLoadingText, 1000);
+
       iframeLoader.load(chatbotUiconfig)
         .then(function () {
            // at this point the API is available
            // so I can send a ping to the iframe
            iframeLoader.api.ping();
+           spinner.remove(); // shuan
+           clearInterval(loadingInterval);
 
           // perform actions on the parent dependent on the chatbot
           // loading. For example, enable the send button once the
@@ -217,6 +258,9 @@
         })
         .catch(function (error) {
           console.error('chatbot UI failed to load', error);
+          spinner.remove(); // shuan
+          clearInterval(loadingInterval);
+
         });
 
       // Sample function illustrating dynamic messaging with the iframe using
@@ -244,7 +288,15 @@
           })
           .then(function () { console.log('message succesfully sent'); })
           .catch(function (err) { console.error('error sending message ', err); });
-      }</script><script>$(document).ready(function chatbotHandler() {
+      }
+    </script>
+
+    <!--
+      This script illustrates how to handle the various events supported by the
+      chatbot UI.
+    -->
+    <script>
+      $(document).ready(function chatbotHandler() {
 
         // When the chatbot ui iframe is ready to receive the
         // dynamic config it sends the 'receivelexconfig' event to the parent
@@ -296,7 +348,7 @@
         // setup Send button handler
         $('#send-intent').on('click', function(event) {
           event.preventDefault();
-          sendUtterance('안녕');
+          sendUtterance('사용 예시를 알려주세요.');
         });
 
 
@@ -339,4 +391,13 @@
 
           $('#slots').replaceWith($slotsContainerReplacement);
         });
-      });</script></body></html>
+      });
+    </script>
+    <script type="text/javascript">
+      function showDescription(description) {
+        alert(description);
+      }
+    </script>
+  
+  </body>
+</html>
